@@ -138,7 +138,7 @@ class ConstraintPenalty:
                 return feasible.astype(float)
         else:
             raise NotImplementedError(f"Mode '{self.mode}' not implemented yet")
-    
+
     def feasibility_rate(self, U_samples, x0, tolerance=1e-6):
         """
         Compute fraction of feasible samples.
