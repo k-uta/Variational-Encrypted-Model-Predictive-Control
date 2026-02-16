@@ -112,7 +112,18 @@ class VariationalMPC:
         xi = np.random.randn(K, self.mpc.Nm)
         return mean + xi @ self.L_U.T
     
-    def compute_weights(self, U_samples, x0, reference='tilde_kappa'):
+    def compute_weights(
+        self,
+        U_samples,
+        x0,
+        reference='tilde_kappa',
+        cheb_coeffs=None,
+        cheb_bound=None,
+        cheb_clip=True,
+        cheb_weight_mode="product",
+        cheb_eta=None,
+        eps=1e-12,
+    ):
         """
         Compute importance weights for sampled trajectories.
         
@@ -126,6 +137,19 @@ class VariationalMPC:
             Reference distribution that samples came from:
             - 'tilde_kappa': samples from tilted distribution (cost already in distribution)
             - 'kappa_0': samples from prior (need to apply cost weighting)
+        cheb_coeffs : ndarray or None
+            Chebyshev coefficients for indicator approximation (optional).
+        cheb_bound : float or None
+            Bound used to scale residuals into [-1, 1] before evaluation.
+        cheb_clip : bool, default=True
+            Clip scaled residuals and polynomial outputs to [-1,1] / [0,1].
+        cheb_weight_mode : str, default='product'
+            'product' for product of per-constraint indicators,
+            'exp' for exp(-eta * sum(1 - r_j)).
+        cheb_eta : float or None
+            Scale for exp weighting when cheb_weight_mode='exp'.
+        eps : float, default=1e-12
+            Numerical epsilon for log/normalization safety.
         
         Returns
         -------
@@ -134,6 +158,15 @@ class VariationalMPC:
         """
         K = U_samples.shape[0]
 
+        def _cheb_indicator(residuals):
+            t = residuals / cheb_bound
+            if cheb_clip:
+                t = np.clip(t, -1.0, 1.0)
+            y = np.polynomial.chebyshev.chebval(t, cheb_coeffs)
+            if cheb_clip:
+                y = np.clip(y, 0.0, 1.0)
+            return y
+
         if reference == 'kappa_0':
             # w_i = exp(-J_0(U_i, x0)/lambda) * r(U_i; x0)
 
@@ -141,18 +174,33 @@ class VariationalMPC:
             costs = np.array([self.mpc.quadratic_cost(x0, U_samples[i]) for i in range(K)])
             
             if self.penalty.has_constraints:
-                desirability = self.penalty.desirability_weight(U_samples, x0)
-                feasible_mask = (desirability > 0)
-                
-                # Initialize log weights to -inf (infeasible)
-                log_weights = np.full(K, -np.inf)
-                
-                # Only feasible samples get finite weights
-                if np.any(feasible_mask):
-                    log_weights[feasible_mask] = -costs[feasible_mask] / self.lambda_param
+                if cheb_coeffs is not None and cheb_bound is not None:
+                    residuals = self.penalty.constraint_residual(U_samples, x0)
+                    r = _cheb_indicator(residuals)
+                    if cheb_weight_mode == "product":
+                        r = np.prod(r, axis=1)
+                    elif cheb_weight_mode == "exp":
+                        if cheb_eta is None:
+                            cheb_eta = 1.0
+                        r = np.exp(-cheb_eta * np.sum(1.0 - r, axis=1))
+                    else:
+                        raise ValueError("cheb_weight_mode must be 'product' or 'exp'")
+
+                    log_r = np.log(np.maximum(r, eps))
+                    log_weights = -costs / self.lambda_param + log_r
                 else:
-                    # No feasible samples
-                    return None
+                    desirability = self.penalty.desirability_weight(U_samples, x0)
+                    feasible_mask = (desirability > 0)
+
+                    # Initialize log weights to -inf (infeasible)
+                    log_weights = np.full(K, -np.inf)
+
+                    # Only feasible samples get finite weights
+                    if np.any(feasible_mask):
+                        log_weights[feasible_mask] = -costs[feasible_mask] / self.lambda_param
+                    else:
+                        # No feasible samples
+                        return None
             else:
                 log_weights = -costs / self.lambda_param
         
@@ -161,16 +209,30 @@ class VariationalMPC:
             # Only apply feasibility weighting: w_i = r(U_i; x0)
             
             if self.penalty.has_constraints:
-                desirability = self.penalty.desirability_weight(U_samples, x0)
-                feasible_mask = (desirability > 0)
+                if cheb_coeffs is not None and cheb_bound is not None:
+                    residuals = self.penalty.constraint_residual(U_samples, x0)
+                    r = _cheb_indicator(residuals)
+                    if cheb_weight_mode == "product":
+                        r = np.prod(r, axis=1)
+                    elif cheb_weight_mode == "exp":
+                        if cheb_eta is None:
+                            cheb_eta = 1.0
+                        r = np.exp(-cheb_eta * np.sum(1.0 - r, axis=1))
+                    else:
+                        raise ValueError("cheb_weight_mode must be 'product' or 'exp'")
 
-                log_weights = np.full(K, -np.inf)
-
-                if np.any(feasible_mask):
-                    log_weights[feasible_mask] = 0.0  # Uniform weights among feasible samples
+                    log_weights = np.log(np.maximum(r, eps))
                 else:
-                    # No feasible samples
-                    return None
+                    desirability = self.penalty.desirability_weight(U_samples, x0)
+                    feasible_mask = (desirability > 0)
+
+                    log_weights = np.full(K, -np.inf)
+
+                    if np.any(feasible_mask):
+                        log_weights[feasible_mask] = 0.0  # Uniform weights among feasible samples
+                    else:
+                        # No feasible samples
+                        return None
 
             else:
                 # Unconstrained: uniform weights

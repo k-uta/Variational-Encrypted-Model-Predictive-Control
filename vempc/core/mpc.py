@@ -4,6 +4,7 @@ MPC problem formulation with condensed representation.
 This module handles the standard LQ-MPC formulation and converts it to a compact form suitable for variational methods.
 """
 
+import time
 import numpy as np
 
 
@@ -175,3 +176,105 @@ class MPCProblem:
         X = self.Lambda @ x0 + self.Psi @ U
         X_reshaped = X.reshape((self.N, self.n))
         return np.vstack([x0.reshape(1, -1), X_reshaped])
+    
+    def build_constraint_matrices(self, Gx, hx, Gu, hu):
+        """
+        Build condensed inequality constraints:
+        G U <= h(x0)
+        from per-step constraints:
+        Gx xk <= hx for k=1..N
+        Gu uk <= hu for k=0..N-1
+        """
+        n = self.n
+        m = self.m
+        N = self.N
+        Lambda = self.Lambda
+        Psi = self.Psi
+
+        px = Gx.shape[0]
+        pu = Gu.shape[0]
+
+        # Stack constraints across horizon
+        Gx_bar = np.kron(np.eye(N), Gx)       # (N*px) x (N*n)
+        hx_bar = np.tile(hx, N)              # (N*px,)
+
+        Gu_bar = np.kron(np.eye(N), Gu)      # (N*pu) x (N*m)
+        hu_bar = np.tile(hu, N)              # (N*pu,)
+
+        # Condensed:
+        #   Gx_bar (Lambda x0 + Psi U) <= hx_bar
+        # => (Gx_bar Psi) U <= hx_bar - (Gx_bar Lambda) x0
+        G_top = Gx_bar @ Psi
+        L_top = Gx_bar @ Lambda
+
+        # Input: Gu_bar U <= hu_bar
+        G_bot = Gu_bar
+        h_bot = hu_bar
+
+        G = np.vstack([G_top, G_bot])
+
+        def h_of_x0(x0):
+            h_top = hx_bar - L_top @ x0
+            return np.hstack([h_top, h_bot])
+
+        return G, h_of_x0
+
+
+def simulate(controller_name, x0, controller_fn, *, A, B, T_steps):
+    xs = [x0.copy()]
+    us = []
+    info_log = []
+    U_warm = None
+
+    start = time.perf_counter()
+    x = x0.copy()
+    for _ in range(T_steps):
+        out = controller_fn(x, U_warm)
+        if isinstance(out, tuple) and len(out) == 3:
+            u, Useq, info = out
+        else:
+            u, Useq = out
+            info = {}
+
+        # store warm start if Useq exists
+        U_warm = Useq.copy() if Useq is not None else None
+
+        # apply input
+        us.append(u.copy())
+        info_log.append(info)
+
+        # propagate
+        x = A @ x + B @ u
+        xs.append(x.copy())
+
+    elapsed = time.perf_counter() - start
+    return np.array(xs), np.array(us), info_log, elapsed
+
+
+def trajectory_cost(xs, us, *, Q, R, Qf):
+    cost = 0.0
+    steps = min(len(us), len(xs) - 1)
+    for k in range(steps):
+        xk = xs[k]
+        uk = us[k]
+        cost += xk.T @ Q @ xk + uk.T @ R @ uk
+    xN = xs[steps]
+    cost += xN.T @ Qf @ xN
+    return float(cost)
+
+
+def max_constraint_violation(xs, us, *, Gx, hx, Gu, hu):
+    vx = 0.0
+    for x in xs[1:]:
+        vx = max(vx, float(np.max(Gx @ x - hx)))
+    vu = 0.0
+    for u in us:
+        vu = max(vu, float(np.max(Gu @ u - hu)))
+    return max(0.0, vx), max(0.0, vu)
+
+
+def avg_acceptance(info_log):
+    vals = np.array([d.get("accept_rate", np.nan) for d in info_log], dtype=float)
+    if np.all(np.isnan(vals)):
+        return float("nan")
+    return float(np.nanmean(vals))
