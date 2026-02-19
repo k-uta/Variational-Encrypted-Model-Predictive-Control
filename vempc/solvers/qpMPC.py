@@ -62,16 +62,30 @@ def chebyshev_indicator_coeffs(order, bound, n_samples=None):
     return coeffs
 
 
-def eval_indicator_poly(z, coeffs, bound, clip=True):
+def chebyshev_relu_coeffs(order, bound, n_samples=None):
     """
-    Evaluate Chebyshev indicator approximation at z.
+    Chebyshev approximation of ReLU(z) = max(0, z) on [-bound, bound].
+
+    Returns coefficients for Chebyshev basis on t = z / bound in [-1, 1].
+    """
+    if bound <= 0:
+        raise ValueError("bound must be positive")
+    if n_samples is None:
+        n_samples = max(200, 10 * order)
+
+    k = np.arange(n_samples)
+    t_nodes = np.cos(np.pi * (2 * k + 1) / (2 * n_samples))
+    y = bound * np.maximum(0.0, t_nodes)
+    coeffs = np.polynomial.chebyshev.chebfit(t_nodes, y, deg=order)
+    return coeffs
+
+
+def eval_relu_poly(z, coeffs, bound, clip=True):
+    """
+    Evaluate Chebyshev ReLU approximation at z.
     """
     t = np.asarray(z, dtype=float) / bound
-    if clip:
-        t = np.clip(t, -1.0, 1.0)
     y = np.polynomial.chebyshev.chebval(t, coeffs)
-    if clip:
-        y = np.clip(y, 0.0, 1.0)
     return y
 
 
@@ -87,7 +101,19 @@ def make_indicator_qp_solver(H, G, *, cheb_order=10, cheb_bound=1.0, eta=1.0, n_
     }
 
 
-def solve_indicator_mpc(
+# Unconstrained QP with polynomial surrogate penalty (ReLU approximation)
+def make_surrogate_qp_solver(H, G, *, cheb_order=10, cheb_bound=1.0, eta=1.0, n_samples=None):
+    coeffs = chebyshev_relu_coeffs(cheb_order, cheb_bound, n_samples=n_samples)
+    return {
+        "H": H,
+        "G": G,
+        "coeffs": coeffs,
+        "bound": cheb_bound,
+        "eta": eta,
+    }
+
+
+def solve_surrogate_mpc(
     x0,
     *,
     S,
@@ -112,13 +138,14 @@ def solve_indicator_mpc(
     def objective(U):
         U = np.asarray(U)
         cost = 0.5 * U @ H @ U + q @ U
+        if G is None:
+            return cost
         g = G @ U - h
-        r = eval_indicator_poly(g, coeffs, bound, clip=True)
-        penalty = eta * np.sum(1.0 - r)
+        s_l = eval_relu_poly(g, coeffs, bound, clip=True)
+        penalty = eta * np.sum(s_l)
         return cost + penalty
 
     if warm_start_U is None:
-        # Unconstrained quadratic minimizer as a stable starting point
         try:
             x_init = -np.linalg.solve(H, q)
         except np.linalg.LinAlgError:
@@ -138,7 +165,6 @@ def solve_indicator_mpc(
         },
     )
     if not res.success:
-        # Fall back to the best available starting point
         Ustar = np.asarray(x_init).reshape(-1)
     else:
         Ustar = np.asarray(res.x).reshape(-1)

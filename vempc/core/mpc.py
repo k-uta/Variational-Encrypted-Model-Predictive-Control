@@ -64,25 +64,22 @@ class MPCProblem:
         """
         n, m, N = self.n, self.m, self.N
         A, B = self.A, self.B
-        
-        # Lambda: stacked powers of A
-        # Lambda = [A; A^2; A^3; ...; A^N]
-        Lambda = np.zeros((N * n, n))
-        A_power = A.copy()
-        for i in range(N):
-            Lambda[i*n:(i+1)*n, :] = A_power
-            A_power = A_power @ A
-        
+
+        # Precompute A^k to avoid repeated matrix_power calls
+        A_powers = [np.eye(n)]
+        for _ in range(N):
+            A_powers.append(A_powers[-1] @ A)
+
+        # Lambda = [A; A^2; ...; A^N]
+        Lambda = np.vstack(A_powers[1:])
+
         Psi = np.zeros((N * n, N * m))
         for i in range(N):
+            row = slice(i * n, (i + 1) * n)
             for j in range(i + 1):
-                power = i - j
-                if power == 0:
-                    A_power = np.eye(n)
-                else:
-                    A_power = np.linalg.matrix_power(A, power)
-                Psi[i*n:(i+1)*n, j*m:(j+1)*m] = A_power @ B
-        
+                col = slice(j * m, (j + 1) * m)
+                Psi[row, col] = A_powers[i - j] @ B
+
         return Lambda, Psi
     
     def _compute_cost_matrices(self):
@@ -103,11 +100,9 @@ class MPCProblem:
         
         # Construct block diagonal Q_bar and R_bar
         # Q_bar = diag(Q, Q, ..., Q, Qf)
-        Q_bar = np.zeros((N * n, N * n))
-        for i in range(N - 1):
-            Q_bar[i*n:(i+1)*n, i*n:(i+1)*n] = self.Q
-        Q_bar[(N-1)*n:N*n, (N-1)*n:N*n] = self.Qf
-        
+        Q_bar = np.kron(np.eye(N), self.Q)
+        Q_bar[(N - 1) * n:N * n, (N - 1) * n:N * n] = self.Qf
+
         # R_bar = diag(R, R, ..., R)
         R_bar = np.kron(np.eye(N), self.R)
         
@@ -221,14 +216,17 @@ class MPCProblem:
 
 
 def simulate(controller_name, x0, controller_fn, *, A, B, T_steps):
-    xs = [x0.copy()]
-    us = []
+    n = A.shape[0]
+    m = B.shape[1]
+    xs = np.empty((T_steps + 1, n), dtype=float)
+    us = np.empty((T_steps, m), dtype=float)
     info_log = []
     U_warm = None
 
     start = time.perf_counter()
     x = x0.copy()
-    for _ in range(T_steps):
+    xs[0] = x
+    for k in range(T_steps):
         out = controller_fn(x, U_warm)
         if isinstance(out, tuple) and len(out) == 3:
             u, Useq, info = out
@@ -240,36 +238,44 @@ def simulate(controller_name, x0, controller_fn, *, A, B, T_steps):
         U_warm = Useq.copy() if Useq is not None else None
 
         # apply input
-        us.append(u.copy())
+        u_arr = np.asarray(u, dtype=float).reshape(-1)
+        us[k] = u_arr
         info_log.append(info)
 
         # propagate
-        x = A @ x + B @ u
-        xs.append(x.copy())
+        x = A @ x + B @ u_arr
+        xs[k + 1] = x
 
     elapsed = time.perf_counter() - start
-    return np.array(xs), np.array(us), info_log, elapsed
+    return xs, us, info_log, elapsed
 
 
 def trajectory_cost(xs, us, *, Q, R, Qf):
-    cost = 0.0
     steps = min(len(us), len(xs) - 1)
-    for k in range(steps):
-        xk = xs[k]
-        uk = us[k]
-        cost += xk.T @ Q @ xk + uk.T @ R @ uk
+    if steps <= 0:
+        xN = xs[0]
+        return float(xN.T @ Qf @ xN)
+
+    xk = xs[:steps]
+    uk = us[:steps]
+    state_cost = np.einsum("ij,jk,ik->", xk, Q, xk)
+    input_cost = np.einsum("ij,jk,ik->", uk, R, uk)
     xN = xs[steps]
-    cost += xN.T @ Qf @ xN
+    cost = state_cost + input_cost + xN.T @ Qf @ xN
     return float(cost)
 
 
 def max_constraint_violation(xs, us, *, Gx, hx, Gu, hu):
     vx = 0.0
-    for x in xs[1:]:
-        vx = max(vx, float(np.max(Gx @ x - hx)))
+    if xs.shape[0] > 1:
+        res_x = xs[1:] @ Gx.T - hx
+        vx = float(np.max(res_x))
+
     vu = 0.0
-    for u in us:
-        vu = max(vu, float(np.max(Gu @ u - hu)))
+    if len(us) > 0:
+        res_u = us @ Gu.T - hu
+        vu = float(np.max(res_u))
+
     return max(0.0, vx), max(0.0, vu)
 
 
