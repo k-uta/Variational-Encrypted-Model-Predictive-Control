@@ -33,7 +33,7 @@ def sample_variational_control(
         h_l = qpMPC.eval_relu_poly(residuals, cheb_coeffs, cheb_bound)
         threshold = qpMPC.eval_relu_poly(0.0, cheb_coeffs, cheb_bound)
         # h_thr = np.where(h_l < threshold, 0.0, h_l - threshold)
-        h_thr = np.where(h_l < threshold, 0.0, h_l - threshold)
+        h_thr = np.where(h_l < threshold, 0.0, h_l)
         s_l = np.sum(h_thr, axis=1)
         eta = float(cheb_eta)
         # Polynomial surrogate weights: r_l = exp(-eta * s_l).
