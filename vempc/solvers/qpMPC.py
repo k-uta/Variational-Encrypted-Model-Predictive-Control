@@ -96,6 +96,7 @@ def solve_surrogate_mpc(
     maxiter=1000,
     ftol=1e-9,
     gtol=1e-6,
+    tau_s=None,
 ):
     H = solver["H"]
     G = solver["G"]
@@ -112,7 +113,12 @@ def solve_surrogate_mpc(
         if G is None:
             return cost
         g = G @ U - h
-        s_l = eval_relu_poly(g, coeffs, bound)
+        h_l = eval_relu_poly(g, coeffs, bound)
+        s_l = np.sum(h_l)
+        p_constraints = len(h)
+        _tau = tau_s if tau_s is not None else p_constraints * float(eval_relu_poly(0.0, coeffs, bound))
+        s_l_bar = max(s_l - _tau, 0.0)
+        penalty = eta * s_l_bar
         # Soft-penalty: larger violations increase the objective via s_l.
         penalty = eta * np.sum(s_l)
         return cost + penalty

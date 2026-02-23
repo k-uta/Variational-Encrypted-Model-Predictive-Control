@@ -1,19 +1,6 @@
 import numpy as np
 from . import qpMPC
 
-def sample_tilted(variational, x0, K):
-    """
-    Draw samples from the tilted Gaussian using core parameters,
-    matching the original sampling orientation for reproducibility.
-    Returns array shape (K, Nm).
-    """
-    mU = variational.m_U(x0)
-    L = variational.L_U
-    # Draw from N(mU, Sigma_U) via mean + L * xi.
-    xi = np.random.randn(K, variational.mpc.Nm)
-    Us = mU[None, :] + xi @ L.T
-    return Us
-
 def sample_variational_control(
     x0,
     variational,
@@ -23,27 +10,45 @@ def sample_variational_control(
     cheb_bound=None,
     cheb_eta=None,
 ):
-    U_samples = sample_tilted(variational, x0, K)
+
+    U_samples = variational.sample_kappa_tilde(x0, K)
+
 
     true_feasible = penalty.is_feasible(U_samples, x0)
     true_accept_num = int(np.sum(true_feasible))  # exact feasibility count
 
     if cheb_coeffs is not None and cheb_bound is not None and penalty.has_constraints:
+
+        # Compute per-constraint polynomial surrogate h_l(g_j)
         residuals = penalty.constraint_residual(U_samples, x0)
         h_l = qpMPC.eval_relu_poly(residuals, cheb_coeffs, cheb_bound)
-        threshold = qpMPC.eval_relu_poly(0.0, cheb_coeffs, cheb_bound)
-        # h_thr = np.where(h_l < threshold, 0.0, h_l - threshold)
-        h_thr = np.where(h_l < threshold, 0.0, h_l)
-        s_l = np.sum(h_thr, axis=1)
+
+        # Aggregate violation score s_l = sum_j h_l(g_j)
+        s_l = np.sum(h_l, axis=1)
+
+        # Threshold at aggregate level per Corollary 1: tau_s = h_l(0)
+        p = residuals.shape[1]  # number of constraints
+        tau_s = p * float(qpMPC.eval_relu_poly(0.0, cheb_coeffs, cheb_bound))
+        s_l_bar = np.maximum(s_l - tau_s, 0.0)
+
+        # Polynomial surrogate desirability: r_bar_l = exp(-eta * s_bar_l)
         eta = float(cheb_eta)
-        # Polynomial surrogate weights: r_l = exp(-eta * s_l).
-        w = np.exp(-eta * s_l)
+        # Polynomial surrogate weights: r_l = exp(-eta * s_l_bar).
+        w = np.exp(-eta * s_l_bar)
         # Sum of weights; used for monitoring (not a true feasibility rate).
-        w_sum = w.sum()
+
     else:
         w = true_feasible.astype(float)
         # Sum of feasible indicators equals the feasible sample count.
-        w_sum = w.sum()
+
+    w_sum = w.sum()
+
+    if w_sum == 0.0:
+        raise RuntimeError(
+            f"sample_variational_control: all weights are zero "
+            f"(K={K}, true_accept_num={true_accept_num}). "
+            f"Increase K, reduce eta, or widen Sigma_0."
+        )
 
 
     # Weighted Monte Carlo estimate of the optimal control sequence.

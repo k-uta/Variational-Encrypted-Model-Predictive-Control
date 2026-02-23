@@ -300,9 +300,10 @@ class VariationalMPC:
         
         # Check for failure (no feasible samples)
         if weights is None:
-            print(f"ERROR: No feasible samples from {reference} with K={K}")
-            print(f"    Cannot compute U_hat. Returning None.")
-            return None
+            raise RuntimeError(
+                f"ERROR: No feasible samples from {reference} with K={K}. "
+                f"Cannot compute U_hat."
+            )
         
         # Weighted average
         U_hat = np.sum(weights[:, np.newaxis] * U_samples, axis=0)
