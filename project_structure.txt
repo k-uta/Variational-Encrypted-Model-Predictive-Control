@@ -1,0 +1,28 @@
+.
+├── project_structure.txt
+├── README.md
+├── Variational-Encrypted-Model-Predictive-Control.code-workspace
+└── vempc
+    ├── __init__.py
+    ├── core
+    │   ├── __init__.py
+    │   ├── constraints.py
+    │   ├── mpc.py
+    │   └── variational.py
+    ├── examples
+    │   ├── double_integrator.py
+    │   └── pendulum.py
+    ├── notebooks
+    │   ├── softening_r.ipynb
+    │   ├── test_double_integrator.ipynb
+    │   └── test.ipynb
+    ├── solvers
+    │   ├── __init__.py
+    │   ├── qpMPC.py
+    │   └── sampling.py
+    └── utils
+        ├── __init__.py
+        ├── helpers.py
+        └── print.py
+
+7 directories, 19 files
