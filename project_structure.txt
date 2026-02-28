@@ -4,17 +4,29 @@
 ├── Variational-Encrypted-Model-Predictive-Control.code-workspace
 └── vempc
     ├── __init__.py
+    ├── backends
+    │   ├── __init__.py
+    │   ├── base.py
+    │   ├── openfhe_backend.py
+    │   └── plaintext_backend.py
     ├── core
     │   ├── __init__.py
     │   ├── constraints.py
     │   ├── mpc.py
     │   └── variational.py
+    ├── crypto
+    │   ├── __init__.py
+    │   ├── offline.py
+    │   ├── online.py
+    │   ├── poly_eval.py
+    │   └── setup.py
     ├── examples
     │   ├── double_integrator.py
     │   └── pendulum.py
     ├── notebooks
     │   ├── softening_r.ipynb
     │   ├── test_double_integrator.ipynb
+    │   ├── test_encrypted.ipynb
     │   └── test.ipynb
     ├── solvers
     │   ├── __init__.py
@@ -25,4 +37,4 @@
         ├── helpers.py
         └── print.py
 
-7 directories, 19 files
+9 directories, 29 files
