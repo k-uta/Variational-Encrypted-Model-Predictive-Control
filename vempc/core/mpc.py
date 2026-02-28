@@ -215,7 +215,9 @@ class MPCProblem:
         return G, h_of_x0
 
 
-def simulate(controller_name, x0, controller_fn, *, A, B, T_steps):
+def simulate(controller_name, x0, controller_fn, *, A, B, T_steps, noise_std=0.0, seed=None):
+    rng = np.random.default_rng(seed)
+
     n = A.shape[0]
     m = B.shape[1]
     xs = np.empty((T_steps + 1, n), dtype=float)
@@ -243,7 +245,9 @@ def simulate(controller_name, x0, controller_fn, *, A, B, T_steps):
         info_log.append(info)
 
         # propagate
-        x = A @ x + B @ u_arr
+        # x = A @ x + B @ u_arr
+        x = A @ x + B @ u_arr + noise_std * rng.standard_normal(A.shape[0])
+
         xs[k + 1] = x
 
     elapsed = time.perf_counter() - start
@@ -267,15 +271,15 @@ def trajectory_cost(xs, us, *, Q, R, Qf):
 
 def max_constraint_violation(xs, us, *, Gx, hx, Gu, hu):
     vx = 0.0
-    if xs.shape[0] > 1:
+    if xs.shape[0] > 1 and Gx.shape[0] > 0:
         res_x = xs[1:] @ Gx.T - hx
         vx = float(np.max(res_x))
 
     vu = 0.0
-    if len(us) > 0:
+    if len(us) > 0 and Gu.shape[0] > 0:
         res_u = us @ Gu.T - hu
         vu = float(np.max(res_u))
-
+        
     return max(0.0, vx), max(0.0, vu)
 
 
