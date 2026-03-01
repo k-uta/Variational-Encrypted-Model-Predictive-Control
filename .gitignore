@@ -9,4 +9,4 @@ build/
 .vscode/
 .DS_Store
 .env
-EOF
+EOFcache/
