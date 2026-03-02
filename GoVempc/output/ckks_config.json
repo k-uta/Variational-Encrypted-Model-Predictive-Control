@@ -34,7 +34,7 @@
   ],
   "logDefaultScale": 30,
   "K": 40,
-  "T": 3,
+  "T": 30,
   "chebOrder": 3,
   "chebBound": 20.0,
   "chebEta": 100.0

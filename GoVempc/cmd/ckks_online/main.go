@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/csv"
-	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -14,6 +13,7 @@ import (
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
 	"gonum.org/v1/gonum/mat"
 
+	"govempc/internal/ckksconfig"
 	"govempc/core"
 	"govempc/examples"
 	"govempc/solvers"
@@ -27,7 +27,7 @@ func main() {
 
 	// Load config (shared by offline/online).
 	cfgPath := filepath.Join("output", "ckks_config.json")
-	cfg, ok := loadConfig(cfgPath)
+	cfg, ok := ckksconfig.Load(cfgPath)
 	if !ok {
 		panic("missing output/ckks_config.json; run the config cell in cmd/test/main.ipynb")
 	}
@@ -145,6 +145,7 @@ func main() {
 	var gks []*rlwe.GaloisKey
 	if p > 1 {
 		kgen := ckks.NewKeyGenerator(params)
+		gks = make([]*rlwe.GaloisKey, 0, p-1)
 		for r := 1; r < p; r++ {
 			gks = append(gks, kgen.GenGaloisKeyNew(params.GaloisElementForRotation(r), sk))
 		}
@@ -158,14 +159,27 @@ func main() {
 
 	// Reuse decode buffer to reduce allocations.
 	decBuf := make([]complex128, slots)
+	decS := make([]complex128, slots)
+	logW := make([]float64, KChunk)
+	defaultScale := params.DefaultScale()
+
 	// Mask to keep the first slot of each p-block after summing constraints.
-	maskP := make([]complex128, slots)
+	maskVals := make([]complex128, slots)
 	for i := 0; i < KChunk; i++ {
 		idx := i * p
 		if idx < slots {
-			maskP[idx] = complex(1.0, 0)
+			maskVals[idx] = complex(1.0, 0)
 		}
 	}
+	var maskPt *rlwe.Plaintext
+
+	// Reuse buffers for plaintext packing.
+	valsMU := make([]complex128, slots)
+	valsB := make([]complex128, slots)
+	var ptMU *rlwe.Plaintext
+	var ptB *rlwe.Plaintext
+
+	cache := newCipherCache(cacheDir)
 
 	// Precompute polynomial coefficients in power basis (z-domain).
 	// We evaluate h_l on encrypted g values using Horner's rule.
@@ -195,11 +209,18 @@ func main() {
 		mU := computeMU(variational, x)
 		b := computeB(penalty, mU, x)
 
-		ctLu := loadCacheCiphertext(cacheDir, "ct_Lu", t)
-		ctGamma := loadCacheCiphertext(cacheDir, "ct_Gamma", t)
+		ctLu := cache.Load("ct_Lu", t)
+		ctGamma := cache.Load("ct_Gamma", t)
 
-		ctMU := tileEncryptVector(mU, dim, KChunk, slots, params, encoder, encryptor, ctLu.Level())
-		ctB := tileEncryptVector(b, p, KChunk, slots, params, encoder, encryptor, ctGamma.Level())
+		if ptMU == nil || ptMU.Level() != ctLu.Level() {
+			ptMU = ckks.NewPlaintext(params, ctLu.Level())
+		}
+		if ptB == nil || ptB.Level() != ctGamma.Level() {
+			ptB = ckks.NewPlaintext(params, ctGamma.Level())
+		}
+
+		ctMU := tileEncryptVector(mU, dim, KChunk, slots, encoder, encryptor, ptMU, valsMU, defaultScale)
+		ctB := tileEncryptVector(b, p, KChunk, slots, encoder, encryptor, ptB, valsB, defaultScale)
 
 		// Cloud: compute Enc(U) and Enc(s_l) on packed slots.
 		cloudStart := time.Now()
@@ -207,7 +228,12 @@ func main() {
 		ctG, _ := evaluator.AddNew(ctB, ctGamma)
 		ctS := evalPoly(ctG, polyZ, evaluator)
 		// Sum constraint penalties within each p-block and keep only the first slot.
-		ctS = sumWithinBlocks(ctS, p, KChunk, slots, maskP, params, encoder, evaluator)
+		if maskPt == nil || maskPt.Level() != ctS.Level() {
+			maskPt = ckks.NewPlaintext(params, ctS.Level())
+			maskPt.Scale = defaultScale
+			_ = encoder.Encode(maskVals, maskPt)
+		}
+		ctS = sumWithinBlocks(ctS, p, maskPt, evaluator)
 		cloudMs := time.Since(cloudStart).Seconds() * 1000.0
 		cloudMsSeries[t] = cloudMs
 		fmt.Printf("step %d cloud_ms %.3f\n", t, cloudMs)
@@ -217,7 +243,7 @@ func main() {
 		_ = encoder.Decode(ptU, decBuf)
 
 		ptS := decryptor.DecryptNew(ctS)
-		decS := make([]complex128, slots)
+		// decS buffer reused
 		_ = encoder.Decode(ptS, decS)
 
 		// Reset accumulator.
@@ -226,7 +252,7 @@ func main() {
 		}
 
 		// Compute weights with log-sum-exp stabilization.
-		logW := make([]float64, KChunk)
+		// logW buffer reused
 		logWMax := math.Inf(-1)
 		for i := 0; i < KChunk; i++ {
 			s := real(decS[i*p])
@@ -307,46 +333,6 @@ func computeB(p *core.ConstraintPenalty, mU []float64, x0 []float64) []float64 {
 	return core.VecSub(GmU, h)
 }
 
-type ckksConfig struct {
-	MCart           float64 `json:"M"`
-	Mass            float64 `json:"m"`
-	Length          float64 `json:"l"`
-	Gravity         float64 `json:"g"`
-	DT              float64 `json:"dt"`
-	N               int     `json:"N"`
-	QDiag           []float64 `json:"QDiag"`
-	RDiag           []float64 `json:"RDiag"`
-	QfScale         float64 `json:"QfScale"`
-	XMax            float64 `json:"xMax"`
-	VMax            float64 `json:"vMax"`
-	ThetaMax        float64 `json:"thetaMax"`
-	OmegaMax        float64 `json:"omegaMax"`
-	UMax            float64 `json:"uMax"`
-	Sigma0          float64 `json:"sigma0"`
-	LambdaParam     float64 `json:"lambda"`
-	LogN            int     `json:"logN"`
-	LogQ            []int   `json:"logQ"`
-	LogP            []int   `json:"logP"`
-	LogDefaultScale int     `json:"logDefaultScale"`
-	K               int     `json:"K"`
-	T               int     `json:"T"`
-	ChebOrder       int     `json:"chebOrder"`
-	ChebBound       float64 `json:"chebBound"`
-	ChebEta         float64 `json:"chebEta"`
-}
-
-func loadConfig(path string) (ckksConfig, bool) {
-	var cfg ckksConfig
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return cfg, false
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		panic(err)
-	}
-	return cfg, true
-}
-
 func loadCrypto(dir string) (ckks.Parameters, *rlwe.SecretKey, *rlwe.PublicKey, *rlwe.RelinearizationKey) {
 	paramsData, err := os.ReadFile(filepath.Join(dir, "params.bin"))
 	if err != nil {
@@ -385,11 +371,31 @@ func loadCrypto(dir string) (ckks.Parameters, *rlwe.SecretKey, *rlwe.PublicKey, 
 	return params, sk, pk, rlk
 }
 
-func loadCacheCiphertext(cacheDir, prefix string, t int) *rlwe.Ciphertext {
-	path := filepath.Join(cacheDir, fmt.Sprintf("%s_%04d.bin", prefix, t))
+type cipherCache struct {
+	dir   string
+	ctMap map[string]*rlwe.Ciphertext
+}
+
+func newCipherCache(dir string) *cipherCache {
+	return &cipherCache{dir: dir, ctMap: make(map[string]*rlwe.Ciphertext)}
+}
+
+func (c *cipherCache) Load(prefix string, t int) *rlwe.Ciphertext {
+	origKey := fmt.Sprintf("%s_%04d", prefix, t)
+	if ct, ok := c.ctMap[origKey]; ok {
+		return ct
+	}
+	key := origKey
+	path := filepath.Join(c.dir, key+".bin")
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) && t != 0 {
-			path = filepath.Join(cacheDir, fmt.Sprintf("%s_%04d.bin", prefix, 0))
+			key0 := fmt.Sprintf("%s_%04d", prefix, 0)
+			if ct, ok := c.ctMap[key0]; ok {
+				c.ctMap[origKey] = ct
+				return ct
+			}
+			key = key0
+			path = filepath.Join(c.dir, key+".bin")
 		} else if err != nil {
 			panic(err)
 		}
@@ -402,34 +408,51 @@ func loadCacheCiphertext(cacheDir, prefix string, t int) *rlwe.Ciphertext {
 	if err := ct.UnmarshalBinary(data); err != nil {
 		panic(err)
 	}
+	c.ctMap[key] = ct
+	if key != origKey {
+		c.ctMap[origKey] = ct
+	}
 	return ct
 }
+
 
 func tileEncryptVector(
 	vec []float64,
 	slotWidth int,
 	kChunk int,
 	slots int,
-	params ckks.Parameters,
 	encoder *ckks.Encoder,
 	encryptor *rlwe.Encryptor,
-	level int,
+	pt *rlwe.Plaintext,
+	vals []complex128,
+	defaultScale rlwe.Scale,
 ) *rlwe.Ciphertext {
-	vals := make([]complex128, slots)
+	for i := range vals {
+		vals[i] = 0
+	}
+	vecLen := len(vec)
 	for i := 0; i < kChunk; i++ {
 		off := i * slotWidth
-		for j := 0; j < slotWidth && off+j < slots; j++ {
-			if j < len(vec) {
-				vals[off+j] = complex(vec[j], 0)
-			}
+		if off >= slots {
+			break
+		}
+		max := slotWidth
+		if off+max > slots {
+			max = slots - off
+		}
+		if vecLen < max {
+			max = vecLen
+		}
+		for j := 0; j < max; j++ {
+			vals[off+j] = complex(vec[j], 0)
 		}
 	}
-	pt := ckks.NewPlaintext(params, level)
-	pt.Scale = params.DefaultScale()
+	pt.Scale = defaultScale
 	_ = encoder.Encode(vals, pt)
 	ct, _ := encryptor.EncryptNew(pt)
 	return ct
 }
+
 
 func maxInt(a, b int) int {
 	if a > b {
@@ -441,11 +464,7 @@ func maxInt(a, b int) int {
 func sumWithinBlocks(
 	ctIn *rlwe.Ciphertext,
 	blockSize int,
-	kChunk int,
-	slots int,
-	maskVals []complex128,
-	params ckks.Parameters,
-	encoder *ckks.Encoder,
+	mask *rlwe.Plaintext,
 	eval *ckks.Evaluator,
 ) *rlwe.Ciphertext {
 	if blockSize <= 1 {
@@ -459,16 +478,14 @@ func sumWithinBlocks(
 		}
 		eval.Add(ctSum, ctRot, ctSum)
 	}
-	pt := ckks.NewPlaintext(params, ctSum.Level())
-	pt.Scale = params.DefaultScale()
-	_ = encoder.Encode(maskVals, pt)
-	ctMasked, err := eval.MulNew(ctSum, pt)
+	ctMasked, err := eval.MulNew(ctSum, mask)
 	if err != nil {
 		panic(err)
 	}
 	_ = eval.Rescale(ctMasked, ctMasked)
 	return ctMasked
 }
+
 
 func evalPoly(ctX *rlwe.Ciphertext, coeffs []float64, eval *ckks.Evaluator) *rlwe.Ciphertext {
 	// Evaluate polynomial in power basis using Horner's rule.

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"math"
 	"math/rand"
@@ -14,6 +13,7 @@ import (
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
 	"gonum.org/v1/gonum/mat"
 
+	"govempc/internal/ckksconfig"
 	"govempc/core"
 	"govempc/examples"
 )
@@ -26,7 +26,7 @@ func main() {
 
 	// Load config (shared by offline/online).
 	cfgPath := filepath.Join("output", "ckks_config.json")
-	cfg, ok := loadConfig(cfgPath)
+	cfg, ok := ckksconfig.Load(cfgPath)
 	if !ok {
 		panic("missing output/ckks_config.json; run the config cell in cmd/test/main.ipynb")
 	}
@@ -165,7 +165,7 @@ func main() {
 	}
 
 	rotations := collectRotations(KChunk, dim, p, slots)
-	var gks []*rlwe.GaloisKey
+	gks := make([]*rlwe.GaloisKey, 0, len(rotations))
 	for _, rot := range rotations {
 		gks = append(gks, kgen.GenGaloisKeyNew(params.GaloisElementForRotation(rot), sk))
 	}
@@ -199,18 +199,17 @@ func main() {
 	cacheLU := make([]*rlwe.Ciphertext, T)
 	cacheG := make([]*rlwe.Ciphertext, T)
 
-	for t := 0; t < T; t++ {
-		ctLUList := make([]*rlwe.Ciphertext, KChunk)
-		ctGList := make([]*rlwe.Ciphertext, KChunk)
+	ctLUList := make([]*rlwe.Ciphertext, KChunk)
+	ctGList := make([]*rlwe.Ciphertext, KChunk)
+	xi := make([]float64, dim)
+	xiPad := make([]float64, p)
 
+	for t := 0; t < T; t++ {
 		for s := 0; s < KChunk; s++ {
-			xi := make([]float64, dim)
 			for i := 0; i < dim; i++ {
 				xi[i] = rng.NormFloat64()
 			}
-			xiPad := make([]float64, p)
 			copy(xiPad, xi)
-
 
 			// Cyclic diagonal encryption
 			ctLU := encMatVec(encLU, xi, dim, slots, params, encoder, evaluator)
@@ -263,18 +262,20 @@ func encryptCyclicDiagonalsSquare(
 	params ckks.Parameters,
 ) []*rlwe.Ciphertext {
 	out := make([]*rlwe.Ciphertext, dim)
+	vals := make([]complex128, slots)
+	pt := ckks.NewPlaintext(params, params.MaxLevel())
+	pt.Scale = params.DefaultScale()
 	for k := 0; k < dim; k++ {
-		vals := make([]complex128, slots)
 		for i := 0; i < dim; i++ {
 			vals[i] = complex(matIn.At(i, (i+k)%dim), 0)
 		}
-		pt := ckks.NewPlaintext(params, params.MaxLevel())
 		_ = encoder.Encode(vals, pt)
 		ct, _ := encryptor.EncryptNew(pt)
 		out[k] = ct
 	}
 	return out
 }
+
 
 func encryptCyclicDiagonalsGamma(
 	gamma *mat.Dense,
@@ -286,15 +287,19 @@ func encryptCyclicDiagonalsGamma(
 	params ckks.Parameters,
 ) []*rlwe.Ciphertext {
 	out := make([]*rlwe.Ciphertext, p)
+	vals := make([]complex128, slots)
+	pt := ckks.NewPlaintext(params, params.MaxLevel())
+	pt.Scale = params.DefaultScale()
 	for k := 0; k < p; k++ {
-		vals := make([]complex128, slots)
+		for i := 0; i < p; i++ {
+			vals[i] = 0
+		}
 		for i := 0; i < p; i++ {
 			j := (i + k) % p
 			if j < dim {
 				vals[i] = complex(gamma.At(i, j), 0)
 			}
 		}
-		pt := ckks.NewPlaintext(params, params.MaxLevel())
 		_ = encoder.Encode(vals, pt)
 		ct, _ := encryptor.EncryptNew(pt)
 		out[k] = ct
@@ -302,17 +307,6 @@ func encryptCyclicDiagonalsGamma(
 	return out
 }
 
-func rotateVector(vec []float64, k int) []float64 {
-	n := len(vec)
-	if n == 0 {
-		return nil
-	}
-	k = mod(k, n)
-	out := make([]float64, n)
-	copy(out, vec[k:])
-	copy(out[n-k:], vec[:k])
-	return out
-}
 
 func encMatVec(
 	ctDiags []*rlwe.Ciphertext,
@@ -324,15 +318,17 @@ func encMatVec(
 	evaluator *ckks.Evaluator,
 ) *rlwe.Ciphertext {
 	var acc *rlwe.Ciphertext
+	vals := make([]complex128, slots)
+	pt := ckks.NewPlaintext(params, params.MaxLevel())
+	pt.Scale = params.DefaultScale()
+	rot := make([]float64, vecLen)
 	// Rotate vector and multiply with each encryption of cyclic diagonal
 	// Then, add them.
 	for k, ctDiag := range ctDiags {
-		rot := rotateVector(xi, k)
-		vals := make([]complex128, slots)
+		rotateVectorInto(rot, xi, k)
 		for i := 0; i < vecLen && i < len(rot); i++ {
 			vals[i] = complex(rot[i], 0)
 		}
-		pt := ckks.NewPlaintext(params, params.MaxLevel())
 		_ = encoder.Encode(vals, pt)
 		term, _ := evaluator.MulNew(ctDiag, pt)
 		_ = evaluator.Rescale(term, term)
@@ -343,6 +339,17 @@ func encMatVec(
 		}
 	}
 	return acc
+}
+
+
+func rotateVectorInto(dst, vec []float64, k int) {
+	n := len(vec)
+	if n == 0 {
+		return
+	}
+	k = mod(k, n)
+	copy(dst, vec[k:])
+	copy(dst[n-k:], vec[:k])
 }
 
 func makeMaskPlaintext(slotWidth, slots int, params ckks.Parameters, encoder *ckks.Encoder) *rlwe.Plaintext {
@@ -468,47 +475,6 @@ func writeCiphertext(path string, ct *rlwe.Ciphertext) error {
 
 func writeBinary(path string, data []byte) error {
 	return os.WriteFile(path, data, 0o644)
-}
-
-type ckksConfig struct {
-	MCart           float64 `json:"M"`
-	Mass            float64 `json:"m"`
-	Length          float64 `json:"l"`
-	Gravity         float64 `json:"g"`
-	DT              float64 `json:"dt"`
-	N               int     `json:"N"`
-	QDiag           []float64 `json:"QDiag"`
-	RDiag           []float64 `json:"RDiag"`
-	QfScale         float64 `json:"QfScale"`
-	XMax            float64 `json:"xMax"`
-	VMax            float64 `json:"vMax"`
-	ThetaMax        float64 `json:"thetaMax"`
-	OmegaMax        float64 `json:"omegaMax"`
-	UMax            float64 `json:"uMax"`
-	Sigma0          float64 `json:"sigma0"`
-	LambdaParam     float64 `json:"lambda"`
-	LogN            int   `json:"logN"`
-	LogQ            []int `json:"logQ"`
-	LogP            []int `json:"logP"`
-	LogDefaultScale int   `json:"logDefaultScale"`
-	K               int   `json:"K"`
-	T               int   `json:"T"`
-	TSteps          int   `json:"TSteps"`
-	ChebOrder       int     `json:"chebOrder"`
-	ChebBound       float64 `json:"chebBound"`
-	ChebEta         float64 `json:"chebEta"`
-}
-
-func loadConfig(path string) (ckksConfig, bool) {
-	var cfg ckksConfig
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return cfg, false
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		panic(err)
-	}
-	return cfg, true
 }
 
 func diagDense(vals []float64) *mat.Dense {
