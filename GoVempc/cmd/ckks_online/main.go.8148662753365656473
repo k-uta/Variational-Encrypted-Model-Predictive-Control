@@ -1,0 +1,620 @@
+package main
+
+import (
+	"encoding/csv"
+	"fmt"
+	"math"
+	"math/rand"
+	"os"
+	"path/filepath"
+	"runtime"
+	"sync"
+	"time"
+
+	"github.com/tuneinsight/lattigo/v6/core/rlwe"
+	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
+	"gonum.org/v1/gonum/mat"
+
+	"govempc/core"
+	"govempc/examples"
+	"govempc/solvers"
+)
+
+func main() {
+	// End-to-end CKKS MPC demo:
+	// - client offline preprocessing and encryption
+	// - cloud offline caching of Enc(LU*xi), Enc(Gamma*xi)
+	// - online encrypted evaluation and client-side aggregation
+
+	// Match the MPC setup used elsewhere for consistency.
+	// This section defines the linearized cart-pole model and MPC weights.
+	M, m, l, g := 1.0, 0.1, 0.5, 9.81
+	dt := 0.01
+	Ac, Bc := examples.LinearizedCartpoleContinuous(M, m, l, g)
+	A, B := examples.Discretize(Ac, Bc, dt)
+
+	// Dimensions and horizon length.
+	n, _ := A.Dims()
+	_, mIn := B.Dims()
+	N := 20
+
+	// Quadratic cost weights.
+	Q := diagDense([]float64{10.0, 1.0, 200.0, 5.0})
+	R := diagDense([]float64{0.2})
+	Qf := mat.NewDense(n, n, nil)
+	Qf.Scale(5.0, Q)
+
+	// Box constraints on state and input.
+	xMax := 2.0
+	vMax := 1.0
+	thetaMax := 0.35
+	omegaMax := 3.0
+	uMax := 1.0
+
+	// Build Gx x <= hx and Gu u <= hu (stacked as [I; -I]).
+	xBound := []float64{xMax, vMax, thetaMax, omegaMax}
+	Gx := stackIdentity(n)
+	hx := append(append([]float64{}, xBound...), xBound...)
+	Gu := stackIdentity(mIn)
+	hu := []float64{uMax, uMax}
+
+	// Chebyshev polynomial parameters for ReLU surrogate.
+	// These control the polynomial approximation h_l used for encrypted constraint penalties.
+	chebOrder := 3
+	chebBound := 20.0
+	chebEta := 100.0
+
+	// Build condensed MPC matrices (Lambda, Psi, S, H).
+	mpc := core.NewMPCProblem(A, B, Q, R, Qf, N)
+	G, hOfX0 := mpc.BuildConstraintMatrices(Gx, hx, Gu, hu)
+	// ConstraintPenalty wraps G and h(x0) to compute constraint residuals.
+	penalty := core.NewConstraintPenalty(G, hOfX0, "indicator")
+
+	// Variational MPC parameters.
+	sigma0 := 0.25
+	Sigma0 := scaledIdentity(mpc.StackedInputDim(), sigma0*sigma0)
+	lambdaParam := 0.1
+
+	// ---- Client offline preprocessing (Algorithm 1: steps 1-4) ----
+	clientStart := time.Now()
+	variational := core.NewVariationalMPC(mpc, penalty, lambdaParam, Sigma0)
+	LU := variational.LU
+	var Gamma mat.Dense
+	Gamma.Mul(penalty.G, LU)
+
+	// CKKS parameters (relaxed security for speed).
+	// NOTE: These are NOT 128-bit secure; they are chosen for runtime.
+	paramsLit := ckks.ParametersLiteral{
+		LogN:            6,
+		LogQ:            []int{30, 30, 30, 30},
+		LogP:            []int{30},
+		LogDefaultScale: 30,
+	}
+	params, _ := ckks.NewParametersFromLiteral(paramsLit)
+
+	// Nm = N * m (stacked control dimension).
+	Nm := mpc.StackedInputDim()
+	sumN := nextPow2(Nm)
+	if sumN > params.MaxSlots() {
+		panic("sumN exceeds CKKS slots")
+	}
+
+	// Key generation:
+	// - sk/pk for encryption/decryption
+	// - rlk for ciphertext multiplication relinearization
+	// - galois keys for rotations used in inner sums
+	kgen := ckks.NewKeyGenerator(params)
+	sk, pk := kgen.GenKeyPairNew()
+	rlk := kgen.GenRelinearizationKeyNew(sk)
+
+	var gks []*rlwe.GaloisKey
+	for step := 1; step < sumN; step <<= 1 {
+		gks = append(gks, kgen.GenGaloisKeyNew(params.GaloisElementForRotation(step), sk))
+	}
+	evalKeys := rlwe.NewMemEvaluationKeySet(rlk, gks...)
+
+	encoder := ckks.NewEncoder(params)
+	encryptor := ckks.NewEncryptor(params, pk)
+	decryptor := ckks.NewDecryptor(params, sk)
+	evaluator := ckks.NewEvaluator(params, evalKeys)
+
+	// Client offline: encrypt rows of L_U and Gamma.
+	// Each row is packed into a CKKS plaintext vector and encrypted.
+	encLU := encryptRows(LU, encoder, encryptor, params, sumN)
+	encGamma := encryptRows(&Gamma, encoder, encryptor, params, sumN)
+	clientOfflineMs := time.Since(clientStart).Seconds() * 1000.0
+
+	rLU, _ := LU.Dims()
+	rG, _ := Gamma.Dims()
+
+	// ---- Cloud offline sampling and caching (Algorithm 1: steps 5-8) ----
+	// Sample xi ~ N(0, I), compute Enc(LU * xi) and Enc(Gamma * xi) and cache.
+	cloudOfflineStart := time.Now()
+	K := 100
+	cacheLU := make([][]*rlwe.Ciphertext, K)
+	cacheG := make([][]*rlwe.Ciphertext, K)
+	maxErrLU := 0.0
+	maxErrG := 0.0
+
+	rng := rand.New(rand.NewSource(0))
+	for s := 0; s < K; s++ {
+		xi := make([]float64, sumN)
+		for i := 0; i < Nm; i++ {
+			xi[i] = rng.NormFloat64()
+		}
+		// Remaining slots stay zero to keep padding deterministic.
+
+		// Encode xi as a plaintext vector.
+		ptXi := ckks.NewPlaintext(params, params.MaxLevel())
+		encodeRealVector(encoder, xi, ptXi)
+
+		// Cache Enc(LU * xi) row-wise.
+		cacheLU[s] = make([]*rlwe.Ciphertext, rLU)
+		for i := 0; i < rLU; i++ {
+			ct, _ := evaluator.MulNew(encLU[i], ptXi)
+			_ = evaluator.Rescale(ct, ct)
+			// Sum all slots to get the inner product LU[i,:] * xi in slot 0.
+			ctSum := innerSum(ct, sumN, evaluator)
+			cacheLU[s][i] = ctSum
+
+			err := decryptMaxAbsError(ctSum, LU, i, xi, Nm, encoder, decryptor)
+			if err > maxErrLU {
+				maxErrLU = err
+			}
+		}
+
+		// Cache Enc(Gamma * xi) row-wise.
+		cacheG[s] = make([]*rlwe.Ciphertext, rG)
+		for i := 0; i < rG; i++ {
+			ct, _ := evaluator.MulNew(encGamma[i], ptXi)
+			_ = evaluator.Rescale(ct, ct)
+			// Sum all slots to get the inner product Gamma[i,:] * xi in slot 0.
+			ctSum := innerSum(ct, sumN, evaluator)
+			cacheG[s][i] = ctSum
+
+			err := decryptMaxAbsError(ctSum, &Gamma, i, xi, Nm, encoder, decryptor)
+			if err > maxErrG {
+				maxErrG = err
+			}
+		}
+	}
+	cloudOfflineMs := time.Since(cloudOfflineStart).Seconds() * 1000.0
+
+	// Precompute polynomial coefficients in power basis (z-domain).
+	// We evaluate h_l on encrypted g values using Horner's rule.
+	chebCoeffs := solvers.ChebyshevReLUCoeffs(chebOrder, chebBound, 0)
+	polyT := chebToPower(chebCoeffs)
+	polyZ := scalePoly(polyT, chebBound)
+	threshold := polyZ[0]
+
+	// ---- Online protocol (Algorithm 2) ----
+	// We simulate TSteps time steps to produce a trajectory.
+	TSteps := 200
+	x0 := []float64{0.3, 0.0, 0.20, 0.0}
+	x := make([]float64, len(x0))
+	copy(x, x0)
+
+	xs := mat.NewDense(TSteps+1, n, nil)
+	us := mat.NewDense(TSteps, mIn, nil)
+	for j := 0; j < n; j++ {
+		xs.Set(0, j, x[j])
+	}
+
+	cloudMsSeries := make([]float64, TSteps)
+
+	// Pre-allocate buffers reused at each timestep.
+	ctUs := make([][]*rlwe.Ciphertext, K)
+	for i := 0; i < K; i++ {
+		ctUs[i] = make([]*rlwe.Ciphertext, rLU)
+	}
+	ctSs := make([]*rlwe.Ciphertext, K)
+	sVals := make([]float64, K)
+	weights := make([]float64, K)
+	uHats := make([][]float64, K)
+	for i := 0; i < K; i++ {
+		uHats[i] = make([]float64, Nm)
+	}
+	Uhat := make([]float64, Nm)
+
+	// Worker pool for the cloud loop over K samples.
+	type cloudJob struct {
+		idx  int
+		encMU []*rlwe.Ciphertext
+		encB  []*rlwe.Ciphertext
+	}
+	jobs := make(chan cloudJob, K)
+	var stepWG sync.WaitGroup
+	var workerWG sync.WaitGroup
+
+	workers := runtime.GOMAXPROCS(0)
+	if workers > K {
+		workers = K
+	}
+	for w := 0; w < workers; w++ {
+		workerEval := ckks.NewEvaluator(params, evalKeys)
+		workerWG.Add(1)
+		go func(eval *ckks.Evaluator) {
+			defer workerWG.Done()
+			for job := range jobs {
+				i := job.idx
+
+				// Enc(U^(i)) = Enc(m_U) + Enc(LU * xi)
+				rowOut := ctUs[i]
+				for r := 0; r < rLU; r++ {
+					rowOut[r] = addAligned(job.encMU[r], cacheLU[i][r], eval)
+				}
+
+				// Enc(g^(i)) per row, then polynomial evaluation and sum:
+				// g = b(x_t) + Gamma*xi, s_l = sum_j h_l(g_j).
+				var ctS *rlwe.Ciphertext
+				for r := 0; r < rG; r++ {
+					ctG := addAligned(job.encB[r], cacheG[i][r], eval)
+					ctH := evalPoly(ctG, polyZ, eval)
+					if ctS == nil {
+						ctS = ctH
+					} else {
+						_ = eval.Add(ctS, ctH, ctS)
+					}
+				}
+				ctSs[i] = ctS
+
+				stepWG.Done()
+			}
+		}(workerEval)
+	}
+
+	var encMU []*rlwe.Ciphertext
+	var encB []*rlwe.Ciphertext
+
+	for t := 0; t < TSteps; t++ {
+		// Client: compute and encrypt m_U(x_t), b(x_t).
+		mU := computeMU(variational, x)
+		b := computeB(penalty, mU, x)
+		encMU = encryptScalarsInto(encMU, mU, encoder, encryptor, params, sumN)
+		encB = encryptScalarsInto(encB, b, encoder, encryptor, params, sumN)
+
+		// Cloud: compute Enc(U^(i)) and Enc(s_l^(i)) for all samples.
+		// Each sample uses cached Enc(LU*xi) and Enc(Gamma*xi).
+		cloudStart := time.Now()
+		stepWG.Add(K)
+		for i := 0; i < K; i++ {
+			jobs <- cloudJob{idx: i, encMU: encMU, encB: encB}
+		}
+		stepWG.Wait()
+		cloudMs := time.Since(cloudStart).Seconds() * 1000.0
+		cloudMsSeries[t] = cloudMs
+		fmt.Printf("step %d cloud_ms %.3f\n", t, cloudMs)
+
+		// Client: decrypt U^(i), s_l^(i), apply threshold, and aggregate.
+		for i := 0; i < K; i++ {
+			Ui := uHats[i]
+			for r := 0; r < rLU; r++ {
+				Ui[r] = decryptScalar(ctUs[i][r], sumN, encoder, decryptor)
+			}
+			if rLU < Nm {
+				for r := rLU; r < Nm; r++ {
+					Ui[r] = 0.0
+				}
+			}
+			s := decryptScalar(ctSs[i], sumN, encoder, decryptor)
+			// Apply thresholding after decryption as requested.
+			if s < threshold {
+				s = 0.0
+			}
+			sVals[i] = s
+			uHats[i] = Ui
+		}
+
+		// Compute weights r_l^(i) = exp(-eta * s_l^(i)).
+		var wSum float64
+		for i := 0; i < K; i++ {
+			w := math.Exp(-chebEta * sVals[i])
+			weights[i] = w
+			wSum += w
+		}
+
+		// Weighted average of sampled controls.
+		for j := 0; j < Nm; j++ {
+			Uhat[j] = 0.0
+		}
+		if wSum > 0 {
+			for i := 0; i < K; i++ {
+				for j := 0; j < Nm; j++ {
+					Uhat[j] += weights[i] * uHats[i][j]
+				}
+			}
+			for j := 0; j < Nm; j++ {
+				Uhat[j] /= wSum
+			}
+		}
+
+		// Apply only the first control input of the stacked sequence.
+		for j := 0; j < mIn; j++ {
+			us.Set(t, j, Uhat[j])
+		}
+
+		// State propagation with discrete-time linear dynamics.
+		Ax := core.MatVecMul(A, x)
+		Bu := core.MatVecMul(B, Uhat[:mIn])
+		for i := 0; i < n; i++ {
+			x[i] = Ax[i] + Bu[i]
+			xs.Set(t+1, i, x[i])
+		}
+	}
+
+	close(jobs)
+	workerWG.Wait()
+
+	// Report only summary info (no raw values).
+	fmt.Printf("L_U dims: %dx%d\n", rLU, Nm)
+	fmt.Printf("Gamma dims: %dx%d\n", rG, Nm)
+	fmt.Printf("Xi dims: %dx%d\n", K, Nm)
+	fmt.Printf("Enc(L_U) dims: %d ciphertexts, %d slots each\n", rLU, sumN)
+	fmt.Printf("Enc(Gamma) dims: %d ciphertexts, %d slots each\n", rG, sumN)
+	fmt.Printf("Cache Enc(L_U xi) dims: %d samples, each %d ciphertexts\n", K, rLU)
+	fmt.Printf("Cache Enc(Gamma xi) dims: %d samples, each %d ciphertexts\n", K, rG)
+	fmt.Printf("Max abs error (L_U xi cache): %.3e\n", maxErrLU)
+	fmt.Printf("Max abs error (Gamma xi cache): %.3e\n", maxErrG)
+	fmt.Printf("Client offline time: %.3f ms\n", clientOfflineMs)
+	fmt.Printf("Cloud offline time: %.3f ms\n", cloudOfflineMs)
+
+	// Persist trajectories and cloud timing.
+	outDir := filepath.Join("output")
+	_ = os.MkdirAll(outDir, 0o755)
+	writeMatCSV(filepath.Join(outDir, "xs_ckks.csv"), xs)
+	writeMatCSV(filepath.Join(outDir, "us_ckks.csv"), us)
+	writeSeriesCSV(filepath.Join(outDir, "cloud_ms_ckks.csv"), cloudMsSeries)
+	fmt.Printf("Saved CKKS MPC outputs to %s\n", outDir)
+}
+
+func computeMU(v *core.VariationalMPC, x0 []float64) []float64 {
+	// m_U(x) = -(1/lambda) * Sigma_U * S^T * x
+	Stx := core.MatVecMul(v.MPC.S.T(), x0)
+	SigmaStx := core.MatVecMul(v.SigmaU, Stx)
+	return core.VecScale(SigmaStx, -(1.0 / v.LambdaParam))
+}
+
+func computeB(p *core.ConstraintPenalty, mU []float64, x0 []float64) []float64 {
+	// b(x) = G * m_U(x) - h(x), used in g = b + Gamma * xi.
+	h := p.HFunc(x0)
+	GmU := core.MatVecMul(p.G, mU)
+	return core.VecSub(GmU, h)
+}
+
+func encryptRows(matIn *mat.Dense, encoder *ckks.Encoder, encryptor *rlwe.Encryptor, params ckks.Parameters, slots int) []*rlwe.Ciphertext {
+	// Pack each row into slots (padding to "slots" length), then encrypt.
+	r, c := matIn.Dims()
+	out := make([]*rlwe.Ciphertext, r)
+	for i := 0; i < r; i++ {
+		vals := make([]complex128, slots)
+		for j := 0; j < c; j++ {
+			vals[j] = complex(matIn.At(i, j), 0)
+		}
+		pt := ckks.NewPlaintext(params, params.MaxLevel())
+		_ = encoder.Encode(vals, pt)
+		ct, _ := encryptor.EncryptNew(pt)
+		out[i] = ct
+	}
+	return out
+}
+
+func encryptScalarsInto(dst []*rlwe.Ciphertext, v []float64, encoder *ckks.Encoder, encryptor *rlwe.Encryptor, params ckks.Parameters, slots int) []*rlwe.Ciphertext {
+	// Replicate each scalar across all slots to align with row-packed ciphertexts.
+	if cap(dst) < len(v) {
+		dst = make([]*rlwe.Ciphertext, len(v))
+	} else {
+		dst = dst[:len(v)]
+	}
+	vals := make([]complex128, slots)
+	pt := ckks.NewPlaintext(params, params.MaxLevel())
+	for i, val := range v {
+		for k := 0; k < slots; k++ {
+			vals[k] = complex(val, 0)
+		}
+		_ = encoder.Encode(vals, pt)
+		ct, _ := encryptor.EncryptNew(pt)
+		dst[i] = ct
+	}
+	return dst
+}
+
+func innerSum(ct *rlwe.Ciphertext, n int, eval *ckks.Evaluator) *rlwe.Ciphertext {
+	// Sum all slots using power-of-two rotations.
+	res := ct.CopyNew()
+	for step := 1; step < n; step <<= 1 {
+		rot, _ := eval.RotateNew(res, step)
+		_ = eval.Add(res, rot, res)
+	}
+	return res
+}
+
+func evalPoly(ctX *rlwe.Ciphertext, coeffs []float64, eval *ckks.Evaluator) *rlwe.Ciphertext {
+	// Evaluate polynomial in power basis using Horner's rule.
+	if len(coeffs) == 0 {
+		return ctX.CopyNew()
+	}
+	// Initialize y = c_d (as ciphertext constant).
+	ctY, _ := eval.MulNew(ctX, 0.0)
+	_ = eval.Add(ctY, coeffs[len(coeffs)-1], ctY)
+
+	for k := len(coeffs) - 2; k >= 0; k-- {
+		ctXk := ctX
+		if ctXk.Level() > ctY.Level() {
+			ctXk = eval.DropLevelNew(ctX, ctX.Level()-ctY.Level())
+		}
+		ctY, _ = eval.MulRelinNew(ctY, ctXk)
+		_ = eval.Rescale(ctY, ctY)
+		_ = eval.Add(ctY, coeffs[k], ctY)
+	}
+	return ctY
+}
+
+func addAligned(a, b *rlwe.Ciphertext, eval *ckks.Evaluator) *rlwe.Ciphertext {
+	// Add two ciphertexts after matching their levels.
+	if a.Level() == b.Level() {
+		out, _ := eval.AddNew(a, b)
+		return out
+	}
+	if a.Level() > b.Level() {
+		aa := eval.DropLevelNew(a, a.Level()-b.Level())
+		out, _ := eval.AddNew(aa, b)
+		return out
+	}
+	bb := eval.DropLevelNew(b, b.Level()-a.Level())
+	out, _ := eval.AddNew(a, bb)
+	return out
+}
+
+func decryptMaxAbsError(ct *rlwe.Ciphertext, ref *mat.Dense, row int, xi []float64, nm int, encoder *ckks.Encoder, decryptor *rlwe.Decryptor) float64 {
+	// Compare decrypted inner product in slot 0 vs. plaintext reference.
+	want := 0.0
+	for k := 0; k < nm; k++ {
+		want += ref.At(row, k) * xi[k]
+	}
+	ptDec := decryptor.DecryptNew(ct)
+	decVals := make([]complex128, len(xi))
+	_ = encoder.Decode(ptDec, decVals)
+	got := real(decVals[0])
+	return math.Abs(got - want)
+}
+
+func decryptScalar(ct *rlwe.Ciphertext, slots int, encoder *ckks.Encoder, decryptor *rlwe.Decryptor) float64 {
+	// Decrypt and read slot 0.
+	ptDec := decryptor.DecryptNew(ct)
+	decVals := make([]complex128, slots)
+	_ = encoder.Decode(ptDec, decVals)
+	return real(decVals[0])
+}
+
+func encodeRealVector(encoder *ckks.Encoder, v []float64, pt *rlwe.Plaintext) {
+	// Encode a real vector into the CKKS plaintext slots.
+	vals := make([]complex128, len(v))
+	for i := range v {
+		vals[i] = complex(v[i], 0)
+	}
+	_ = encoder.Encode(vals, pt)
+}
+
+func chebToPower(cheb []float64) []float64 {
+	// Convert Chebyshev coefficients (T basis) to power basis.
+	n := len(cheb)
+	if n == 0 {
+		return nil
+	}
+	poly := make([]float64, n)
+
+	tkm2 := []float64{1.0}
+	addPolyScaled(poly, tkm2, cheb[0])
+
+	if n == 1 {
+		return poly
+	}
+
+	tkm1 := []float64{0.0, 1.0}
+	addPolyScaled(poly, tkm1, cheb[1])
+
+	for k := 2; k < n; k++ {
+		tk := make([]float64, k+1)
+		for i := 0; i < len(tkm1); i++ {
+			tk[i+1] += 2.0 * tkm1[i]
+		}
+		for i := 0; i < len(tkm2); i++ {
+			tk[i] -= tkm2[i]
+		}
+		addPolyScaled(poly, tk, cheb[k])
+		tkm2 = tkm1
+		tkm1 = tk
+	}
+
+	return poly
+}
+
+func addPolyScaled(dst, src []float64, scale float64) {
+	// dst += scale * src
+	for i := 0; i < len(src); i++ {
+		dst[i] += scale * src[i]
+	}
+}
+
+func scalePoly(poly []float64, bound float64) []float64 {
+	// Scale coefficients for the z-domain (x = z / bound).
+	out := make([]float64, len(poly))
+	pow := 1.0
+	for i := 0; i < len(poly); i++ {
+		out[i] = poly[i] / pow
+		pow *= bound
+	}
+	return out
+}
+
+func nextPow2(n int) int {
+	// Small helper for CKKS slot alignment.
+	if n <= 1 {
+		return 1
+	}
+	p := 1
+	for p < n {
+		p <<= 1
+	}
+	return p
+}
+
+func writeMatCSV(path string, m *mat.Dense) {
+	// Write dense matrix to CSV with fixed precision.
+	f, _ := os.Create(path)
+	defer f.Close()
+
+	w := csv.NewWriter(f)
+	r, c := m.Dims()
+	row := make([]string, c)
+	for i := 0; i < r; i++ {
+		for j := 0; j < c; j++ {
+			row[j] = fmt.Sprintf("%.10f", m.At(i, j))
+		}
+		_ = w.Write(row)
+	}
+	w.Flush()
+	_ = w.Error()
+}
+
+func writeSeriesCSV(path string, series []float64) {
+	// Write a vector to a single-column CSV.
+	f, _ := os.Create(path)
+	defer f.Close()
+
+	w := csv.NewWriter(f)
+	for _, v := range series {
+		_ = w.Write([]string{fmt.Sprintf("%.10f", v)})
+	}
+	w.Flush()
+	_ = w.Error()
+}
+
+func diagDense(vals []float64) *mat.Dense {
+	// Create a diagonal matrix from the provided vector.
+	n := len(vals)
+	out := mat.NewDense(n, n, nil)
+	for i := 0; i < n; i++ {
+		out.Set(i, i, vals[i])
+	}
+	return out
+}
+
+func scaledIdentity(n int, value float64) *mat.Dense {
+	// Build value * I_n.
+	out := mat.NewDense(n, n, nil)
+	for i := 0; i < n; i++ {
+		out.Set(i, i, value)
+	}
+	return out
+}
+
+func stackIdentity(n int) *mat.Dense {
+	// Stack [I; -I] to build box constraints.
+	out := mat.NewDense(2*n, n, nil)
+	for i := 0; i < n; i++ {
+		out.Set(i, i, 1.0)
+		out.Set(i+n, i, -1.0)
+	}
+	return out
+}

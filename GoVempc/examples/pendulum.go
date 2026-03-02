@@ -1,0 +1,57 @@
+package examples
+
+import "gonum.org/v1/gonum/mat"
+
+func LinearizedCartpoleContinuous(M, m, l, g float64) (*mat.Dense, *mat.Dense) {
+	// Linearized cart-pole around upright equilibrium (small angle).
+	// State: [pos, vel, theta, theta_dot], input: cart force.
+	Ac := mat.NewDense(4, 4, nil)
+	Bc := mat.NewDense(4, 1, nil)
+
+	// xdot = v
+	Ac.Set(0, 1, 1.0)
+	// vdot = u/M + (m*g/M) * theta
+	Ac.Set(1, 2, (m*g)/M)
+	Bc.Set(1, 0, 1.0/M)
+	// thetadot = omega
+	Ac.Set(2, 3, 1.0)
+	// omegadot = -(1/(l*M)) u - ((M+m)g/(l*M)) * theta
+	Ac.Set(3, 2, -((M+m)*g)/(l*M))
+	Bc.Set(3, 0, -1.0/(l*M))
+
+	return Ac, Bc
+}
+
+func Discretize(Ac, Bc *mat.Dense, dt float64) (*mat.Dense, *mat.Dense) {
+	// Zero-order hold discretization using matrix exponential of the
+	// augmented continuous-time system.
+	n, _ := Ac.Dims()
+	_, m := Bc.Dims()
+
+	aug := mat.NewDense(n+m, n+m, nil)
+	for i := 0; i < n; i++ {
+		for j := 0; j < n; j++ {
+			aug.Set(i, j, Ac.At(i, j))
+		}
+		for j := 0; j < m; j++ {
+			aug.Set(i, n+j, Bc.At(i, j))
+		}
+	}
+
+	var augScaled mat.Dense
+	augScaled.Scale(dt, aug)
+	var exp mat.Dense
+	exp.Exp(&augScaled)
+
+	Ad := mat.NewDense(n, n, nil)
+	Bd := mat.NewDense(n, m, nil)
+	for i := 0; i < n; i++ {
+		for j := 0; j < n; j++ {
+			Ad.Set(i, j, exp.At(i, j))
+		}
+		for j := 0; j < m; j++ {
+			Bd.Set(i, j, exp.At(i, n+j))
+		}
+	}
+	return Ad, Bd
+}
