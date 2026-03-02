@@ -7,7 +7,7 @@ venv/
 dist/
 build/
 .vscode/
-.DS_Store
+.DS_Storegocache/
 .env
-EOF"GoVempc/.gomodcache/" 
-"**/.gomodcache/" 
+.gocache/
+.gomodcache/
