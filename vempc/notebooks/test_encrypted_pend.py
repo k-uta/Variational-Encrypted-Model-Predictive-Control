@@ -54,7 +54,7 @@ N         = 6    # MPC horizon; longer horizon improves stabilization of
                  # the unstable cart-pole system
 K         = 500  # total samples
 N_WORKERS = 4    # K_chunk = 125
-T_steps   = 2
+T_steps   = 30
 
 # Small initial deviation from upright equilibrium.
 # Angle of 0.15 rad (~8.6 deg) is well within the relaxed theta_max=0.5.
