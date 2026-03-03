@@ -22,6 +22,21 @@ func LinearizedCartpoleContinuous(M, m, l, g float64) (*mat.Dense, *mat.Dense) {
 	return Ac, Bc
 }
 
+func LinearizedInvertedPendulumContinuous(m, l, g float64) (*mat.Dense, *mat.Dense) {
+	// Linearized inverted pendulum around upright equilibrium (small angle).
+	// State: [theta, theta_dot], input: torque at the pivot.
+	Ac := mat.NewDense(2, 2, nil)
+	Bc := mat.NewDense(2, 1, nil)
+
+	// theta_dot = omega
+	Ac.Set(0, 1, 1.0)
+	// omega_dot = (g/l) * theta + (1/(m*l^2)) * u
+	Ac.Set(1, 0, g/l)
+	Bc.Set(1, 0, 1.0/(m*l*l))
+
+	return Ac, Bc
+}
+
 func Discretize(Ac, Bc *mat.Dense, dt float64) (*mat.Dense, *mat.Dense) {
 	// Zero-order hold discretization using matrix exponential of the
 	// augmented continuous-time system.

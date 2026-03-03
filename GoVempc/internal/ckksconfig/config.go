@@ -6,7 +6,6 @@ import (
 )
 
 type Config struct {
-	MCart           float64   `json:"M"`
 	Mass            float64   `json:"m"`
 	Length          float64   `json:"l"`
 	Gravity         float64   `json:"g"`
@@ -15,8 +14,7 @@ type Config struct {
 	QDiag           []float64 `json:"QDiag"`
 	RDiag           []float64 `json:"RDiag"`
 	QfScale         float64   `json:"QfScale"`
-	XMax            float64   `json:"xMax"`
-	VMax            float64   `json:"vMax"`
+	X0              []float64 `json:"x0"`
 	ThetaMax        float64   `json:"thetaMax"`
 	OmegaMax        float64   `json:"omegaMax"`
 	UMax            float64   `json:"uMax"`

@@ -32,13 +32,13 @@ func main() {
 	}
 
 	// Match the MPC setup used in cmd/test for consistency.
-	if cfg.MCart <= 0 || cfg.Mass <= 0 || cfg.Length <= 0 || cfg.Gravity <= 0 || cfg.DT <= 0 || cfg.N <= 0 {
-		panic("invalid model parameters in output/ckks_config.json; set M, m, l, g, dt, N")
+	if cfg.Mass <= 0 || cfg.Length <= 0 || cfg.Gravity <= 0 || cfg.DT <= 0 || cfg.N <= 0 {
+		panic("invalid model parameters in output/ckks_config.json; set m, l, g, dt, N")
 	}
-	M, m, l, g := cfg.MCart, cfg.Mass, cfg.Length, cfg.Gravity
+	m, l, g := cfg.Mass, cfg.Length, cfg.Gravity
 	dt := cfg.DT
 	N := cfg.N
-	Ac, Bc := examples.LinearizedCartpoleContinuous(M, m, l, g)
+	Ac, Bc := examples.LinearizedInvertedPendulumContinuous(m, l, g)
 	A, B := examples.Discretize(Ac, Bc, dt)
 
 	// Dimensions and horizon length.
@@ -53,6 +53,12 @@ func main() {
 	if cfg.QfScale <= 0 {
 		panic("invalid QfScale in output/ckks_config.json; set a positive value")
 	}
+	if len(cfg.X0) == 0 {
+		panic("missing x0 in output/ckks_config.json; set x0 in the config cell in cmd/test/main.ipynb")
+	}
+	if len(cfg.X0) != n {
+		panic("x0 length must match state dimension n in output/ckks_config.json")
+	}
 
 	// Quadratic cost weights.
 	Q := diagDense(cfg.QDiag)
@@ -61,17 +67,15 @@ func main() {
 	Qf.Scale(cfg.QfScale, Q)
 
 	// Box constraints on state and input.
-	if cfg.XMax <= 0 || cfg.VMax <= 0 || cfg.ThetaMax <= 0 || cfg.OmegaMax <= 0 || cfg.UMax <= 0 {
-		panic("invalid constraint bounds in output/ckks_config.json; set xMax/vMax/thetaMax/omegaMax/uMax")
+	if cfg.ThetaMax <= 0 || cfg.OmegaMax <= 0 || cfg.UMax <= 0 {
+		panic("invalid constraint bounds in output/ckks_config.json; set thetaMax/omegaMax/uMax")
 	}
-	xMax := cfg.XMax
-	vMax := cfg.VMax
 	thetaMax := cfg.ThetaMax
 	omegaMax := cfg.OmegaMax
 	uMax := cfg.UMax
 
 	// Build Gx x <= hx and Gu u <= hu (stacked as [I; -I]).
-	xBound := []float64{xMax, vMax, thetaMax, omegaMax}
+	xBound := []float64{thetaMax, omegaMax}
 	Gx := stackIdentity(n)
 	hx := append(append([]float64{}, xBound...), xBound...)
 	Gu := stackIdentity(mIn)

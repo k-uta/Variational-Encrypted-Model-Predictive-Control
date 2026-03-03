@@ -1,24 +1,23 @@
 {
-  "M": 1.0,
-  "m": 0.1,
+  "m": 0.2,
   "l": 0.5,
   "g": 9.81,
   "dt": 0.01,
   "N": 10,
   "QDiag": [
-    10.0,
-    1.0,
-    200.0,
+    50.0,
     5.0
   ],
   "RDiag": [
-    0.2
+    0.1
   ],
-  "QfScale": 5.0,
-  "xMax": 2.0,
-  "vMax": 1.0,
-  "thetaMax": 0.35,
-  "omegaMax": 3.0,
+  "QfScale": 2.0,
+  "x0": [
+    0.3,
+    0.1
+  ],
+  "thetaMax": 0.4,
+  "omegaMax": 2.0,
   "uMax": 1.0,
   "sigma0": 0.25,
   "lambda": 0.1,
@@ -33,9 +32,9 @@
     30
   ],
   "logDefaultScale": 30,
-  "K": 40,
-  "T": 30,
+  "K": 60,
+  "T": 500,
   "chebOrder": 3,
   "chebBound": 20.0,
-  "chebEta": 100.0
+  "chebEta": 200.0
 }

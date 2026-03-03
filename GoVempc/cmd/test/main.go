@@ -31,20 +31,18 @@ func main() {
 	cfg, cfgOK := loadConfig(cfgPath)
 
 	// Defaults (used if no config is present).
-	M, m, l, g := 1.0, 0.1, 0.5, 9.81
+	m, l, g := 0.2, 0.5, 9.81
 	dt := 0.01
 	N := 10
 	TSteps := 1000
-	QDiag := []float64{10.0, 1.0, 200.0, 5.0}
-	RDiag := []float64{0.2}
-	QfScale := 5.0
+	QDiag := []float64{50.0, 5.0}
+	RDiag := []float64{0.1}
+	QfScale := 2.0
 
 	// Constraints
-	xMax := 2.0
-	vMax := 1.0
 	thetaMax := 0.35
-	omegaMax := 3.0
-	uMax := 1.0
+	omegaMax := 4.0
+	uMax := 2.0
 
 	// Variational MPC parameters
 	sigma0 := 0.25
@@ -56,10 +54,10 @@ func main() {
 	chebClip := true
 
 	if cfgOK {
-		if cfg.MCart <= 0 || cfg.Mass <= 0 || cfg.Length <= 0 || cfg.Gravity <= 0 || cfg.DT <= 0 || cfg.N <= 0 {
-			panic("invalid model parameters in output/ckks_config.json; set M, m, l, g, dt, N")
+		if cfg.Mass <= 0 || cfg.Length <= 0 || cfg.Gravity <= 0 || cfg.DT <= 0 || cfg.N <= 0 {
+			panic("invalid model parameters in output/ckks_config.json; set m, l, g, dt, N")
 		}
-		M, m, l, g = cfg.MCart, cfg.Mass, cfg.Length, cfg.Gravity
+		m, l, g = cfg.Mass, cfg.Length, cfg.Gravity
 		dt = cfg.DT
 		N = cfg.N
 		if cfg.TSteps > 0 {
@@ -73,11 +71,9 @@ func main() {
 		QDiag = cfg.QDiag
 		RDiag = cfg.RDiag
 		QfScale = cfg.QfScale
-		if cfg.XMax <= 0 || cfg.VMax <= 0 || cfg.ThetaMax <= 0 || cfg.OmegaMax <= 0 || cfg.UMax <= 0 {
-			panic("invalid constraint bounds in output/ckks_config.json; set xMax/vMax/thetaMax/omegaMax/uMax")
+		if cfg.ThetaMax <= 0 || cfg.OmegaMax <= 0 || cfg.UMax <= 0 {
+			panic("invalid constraint bounds in output/ckks_config.json; set thetaMax/omegaMax/uMax")
 		}
-		xMax = cfg.XMax
-		vMax = cfg.VMax
 		thetaMax = cfg.ThetaMax
 		omegaMax = cfg.OmegaMax
 		uMax = cfg.UMax
@@ -100,7 +96,7 @@ func main() {
 	}
 
 	// System Define
-	Ac, Bc := examples.LinearizedCartpoleContinuous(M, m, l, g)
+	Ac, Bc := examples.LinearizedInvertedPendulumContinuous(m, l, g)
 	A, B := examples.Discretize(Ac, Bc, dt)
 
 	n, _ := A.Dims()
@@ -120,7 +116,7 @@ func main() {
 	Qf := mat.NewDense(n, n, nil)
 	Qf.Scale(QfScale, Q)
 
-	xBound := []float64{xMax, vMax, thetaMax, omegaMax}
+	xBound := []float64{thetaMax, omegaMax}
 
 	Gx := stackIdentity(n) // +- identities
 	hx := append(append([]float64{}, xBound...), xBound...)
@@ -145,7 +141,7 @@ func main() {
 		return u, Useq, nil
 	}
 
-	x0 := []float64{0.3, 0.0, 0.20, 0.0}
+	x0 := []float64{0.20, 0.0}
 
 	xsStd, usStd, _, tStd := core.Simulate(x0, solveStandard, A, B, TSteps)
 
@@ -209,9 +205,9 @@ func main() {
 
 	plotDir := filepath.Join(outDir, "plots")
 	_ = os.MkdirAll(plotDir, 0o755)
-	_ = plotMPC(xsStd, usStd, dt, xMax, vMax, thetaMax, omegaMax, uMax, "Standard MPC",
+	_ = plotMPC(xsStd, usStd, dt, thetaMax, omegaMax, uMax, "Standard MPC",
 		filepath.Join(plotDir, "standard_mpc.png"))
-	_ = plotMPC(xsVar, usVar, dt, xMax, vMax, thetaMax, omegaMax, uMax, "Variational MPC",
+	_ = plotMPC(xsVar, usVar, dt, thetaMax, omegaMax, uMax, "Variational MPC",
 		filepath.Join(plotDir, "variational_mpc.png"))
 	_ = plotVariationalStats(wSumSeries, accSeries, dt, TSteps, KSamples,
 		filepath.Join(plotDir, "variational_stats.png"))
@@ -223,7 +219,6 @@ func main() {
 
 
 type ckksConfig struct {
-	MCart           float64   `json:"M"`
 	Mass            float64   `json:"m"`
 	Length          float64   `json:"l"`
 	Gravity         float64   `json:"g"`
@@ -232,8 +227,6 @@ type ckksConfig struct {
 	QDiag           []float64 `json:"QDiag"`
 	RDiag           []float64 `json:"RDiag"`
 	QfScale         float64   `json:"QfScale"`
-	XMax            float64   `json:"xMax"`
-	VMax            float64   `json:"vMax"`
 	ThetaMax        float64   `json:"thetaMax"`
 	OmegaMax        float64   `json:"omegaMax"`
 	UMax            float64   `json:"uMax"`
@@ -339,7 +332,7 @@ func mean(v []float64) float64 {
 	return sum / float64(len(v))
 }
 
-func plotMPC(xs, us *mat.Dense, dt float64, xMax, vMax, thetaMax, omegaMax, uMax float64, title, outPath string) error {
+func plotMPC(xs, us *mat.Dense, dt float64, thetaMax, omegaMax, uMax float64, title, outPath string) error {
 	t := make([]float64, xs.RawMatrix().Rows)
 	for i := range t {
 		t[i] = float64(i) * dt
@@ -349,42 +342,29 @@ func plotMPC(xs, us *mat.Dense, dt float64, xMax, vMax, thetaMax, omegaMax, uMax
 		tu[i] = float64(i) * dt
 	}
 
-	p0, err := linePlot(t, colSlice(xs, 0), "time [s]", "p [m]")
+	p0, err := linePlot(t, colSlice(xs, 0), "time [s]", "theta [rad]")
 	if err != nil {
 		return err
 	}
 	p0.Title.Text = title
-	addBounds(p0, t[0], t[len(t)-1], xMax)
+	addBounds(p0, t[0], t[len(t)-1], thetaMax)
 
-	p1, err := linePlot(t, colSlice(xs, 1), "time [s]", "p_dot [m/s]")
+	p1, err := linePlot(t, colSlice(xs, 1), "time [s]", "theta_dot [rad/s]")
 	if err != nil {
 		return err
 	}
-	addBounds(p1, t[0], t[len(t)-1], vMax)
+	addBounds(p1, t[0], t[len(t)-1], omegaMax)
 
-	p2, err := linePlot(t, colSlice(xs, 2), "time [s]", "theta [rad]")
+	p2, err := stepPlot(tu, colSlice(us, 0), "time [s]", "u [N·m]")
 	if err != nil {
 		return err
 	}
-	addBounds(p2, t[0], t[len(t)-1], thetaMax)
-
-	p3, err := linePlot(t, colSlice(xs, 3), "time [s]", "theta_dot [rad/s]")
-	if err != nil {
-		return err
-	}
-	addBounds(p3, t[0], t[len(t)-1], omegaMax)
-
-	p4, err := stepPlot(tu, colSlice(us, 0), "time [s]", "u [N]")
-	if err != nil {
-		return err
-	}
-	addBounds(p4, tu[0], tu[len(tu)-1], uMax)
+	addBounds(p2, tu[0], tu[len(tu)-1], uMax)
 
 	grid := [][]*plot.Plot{
 		{p0, p1, p2},
-		{p3, p4, nil},
 	}
-	return saveGrid(grid, vg.Points(900), vg.Points(520), outPath)
+	return saveGrid(grid, vg.Points(900), vg.Points(360), outPath)
 }
 
 func plotVariationalStats(wSum, acc []float64, dt float64, steps int, kSamples int, outPath string) error {
