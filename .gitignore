@@ -11,3 +11,8 @@ build/
 .env
 .gocache/
 .gomodcache/
+
+cache/
+cache_pend/
+*.bin
+.DS_Store
