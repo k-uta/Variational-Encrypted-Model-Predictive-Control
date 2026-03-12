@@ -31,11 +31,11 @@
   "logP": [
     30
   ],
-  "logDefaultScale": 40,
+  "logDefaultScale": 30,
   "K": 240,
   "nWorkers": 4,
-  "T": 200,
-  "chebOrder": 10,
+  "T": 40,
+  "chebOrder": 3,
   "chebBound": 5.0,
   "chebEta": 500.0
 }

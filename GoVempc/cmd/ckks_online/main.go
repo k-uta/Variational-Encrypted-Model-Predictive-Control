@@ -190,12 +190,13 @@ func main() {
 		xs.Set(0, j, x[j])
 	}
 
-	// Threshold 함수 확인
-
-	cloudMsSeries := make([]float64, T)
+	controlMsSeries := make([]float64, T)
 	Uhat := make([]float64, Nm)
 
 	for t := 0; t < T; t++ {
+		// Time check start
+		iterStart := time.Now()
+
 		// Client: compute and encrypt m_U(x_t), b(x_t).
 		mU := computeMU(variational, x)
 		b := computeB(penalty, mU, x)
@@ -219,15 +220,6 @@ func main() {
 				panic(err)
 			}
 		}
-
-		cloudMs := 0.0
-		for _, worker := range workers {
-			if worker.cloudMs > cloudMs {
-				cloudMs = worker.cloudMs
-			}
-		}
-		cloudMsSeries[t] = cloudMs
-		fmt.Printf("step %d cloud_ms %.3f\n", t, cloudMs)
 
 		// Client: aggregate all worker chunks with global log-sum-exp stabilization.
 		for j := 0; j < Nm; j++ {
@@ -274,9 +266,13 @@ func main() {
 			x[i] = Ax[i] + Bu[i]
 			xs.Set(t+1, i, x[i])
 		}
+		// Time check end
+		controlMs := time.Since(iterStart).Seconds() * 1000.0
+		controlMsSeries[t] = controlMs
+		fmt.Printf("step %d control_iter_ms %.3f\n", t, controlMs)
 	}
 
-	cloudMean, cloudStd := meanStd(cloudMsSeries)
+	controlMean, controlStd := meanStd(controlMsSeries)
 
 	// Report only summary info (no raw values).
 	fmt.Printf("L_U dims: %dx%d\n", rLU, dim)
@@ -285,14 +281,14 @@ func main() {
 	fmt.Printf("K: %d, nWorkers: %d, K_chunk: %d\n", K, nWorkers, KChunk)
 	fmt.Printf("Packed samples per ct: %d (slotWidth=%d)\n", KChunk, slotWidth)
 	fmt.Printf("Cache dir: %s\n", cacheDir)
-	fmt.Printf("Online cloud time mean/std: %.3f ms / %.3f ms\n", cloudMean, cloudStd)
+	fmt.Printf("Control iteration time mean/std: %.3f ms / %.3f ms\n", controlMean, controlStd)
 
 	// Persist trajectories and cloud timing.
 	outDir := filepath.Join("output")
 	_ = os.MkdirAll(outDir, 0o755)
 	writeMatCSV(filepath.Join(outDir, "xs_ckks.csv"), xs)
 	writeMatCSV(filepath.Join(outDir, "us_ckks.csv"), us)
-	writeSeriesCSV(filepath.Join(outDir, "cloud_ms_ckks.csv"), cloudMsSeries)
+	writeSeriesCSV(filepath.Join(outDir, "control_iter_ms_ckks.csv"), controlMsSeries)
 	fmt.Printf("Saved CKKS MPC outputs to %s\n", outDir)
 }
 
