@@ -7,23 +7,19 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
 	"gonum.org/v1/gonum/mat"
 
-	"govempc/internal/ckksconfig"
 	"govempc/core"
 	"govempc/examples"
+	"govempc/internal/ckksconfig"
 )
 
 func main() {
-	// Demonstrate the CKKS "offline" phase only:
-	// 1) client builds MPC matrices and encrypts row-packed matrices, then
-	// 2) cloud multiplies them by random xi samples to populate a cache.
-	// This is a lightweight sanity check for ciphertext-plaintext products.
-
 	// Load config (shared by offline/online).
 	cfgPath := filepath.Join("output", "ckks_config.json")
 	cfg, ok := ckksconfig.Load(cfgPath)
@@ -31,34 +27,17 @@ func main() {
 		panic("missing output/ckks_config.json; run the config cell in cmd/test/main.ipynb")
 	}
 
-	// Match the MPC setup used in cmd/test for consistency.
-	if cfg.Mass <= 0 || cfg.Length <= 0 || cfg.Gravity <= 0 || cfg.DT <= 0 || cfg.N <= 0 {
-		panic("invalid model parameters in output/ckks_config.json; set m, l, g, dt, N")
-	}
 	m, l, g := cfg.Mass, cfg.Length, cfg.Gravity
 	dt := cfg.DT
 	N := cfg.N
 	Ac, Bc := examples.LinearizedInvertedPendulumContinuous(m, l, g)
 	A, B := examples.Discretize(Ac, Bc, dt)
+	fmt.Printf("A =\n%v\n", mat.Formatted(A, mat.Prefix("  "), mat.Squeeze()))
+	fmt.Printf("B =\n%v\n", mat.Formatted(B, mat.Prefix("  "), mat.Squeeze()))
 
 	// Dimensions and horizon length.
 	n, _ := A.Dims()
 	_, mIn := B.Dims()
-	if len(cfg.QDiag) != n {
-		panic("QDiag length must match state dimension n in output/ckks_config.json")
-	}
-	if len(cfg.RDiag) != mIn {
-		panic("RDiag length must match input dimension m in output/ckks_config.json")
-	}
-	if cfg.QfScale <= 0 {
-		panic("invalid QfScale in output/ckks_config.json; set a positive value")
-	}
-	if len(cfg.X0) == 0 {
-		panic("missing x0 in output/ckks_config.json; set x0 in the config cell in cmd/test/main.ipynb")
-	}
-	if len(cfg.X0) != n {
-		panic("x0 length must match state dimension n in output/ckks_config.json")
-	}
 
 	// Quadratic cost weights.
 	Q := diagDense(cfg.QDiag)
@@ -66,10 +45,6 @@ func main() {
 	Qf := mat.NewDense(n, n, nil)
 	Qf.Scale(cfg.QfScale, Q)
 
-	// Box constraints on state and input.
-	if cfg.ThetaMax <= 0 || cfg.OmegaMax <= 0 || cfg.UMax <= 0 {
-		panic("invalid constraint bounds in output/ckks_config.json; set thetaMax/omegaMax/uMax")
-	}
 	thetaMax := cfg.ThetaMax
 	omegaMax := cfg.OmegaMax
 	uMax := cfg.UMax
@@ -86,10 +61,7 @@ func main() {
 	G, hOfX0 := mpc.BuildConstraintMatrices(Gx, hx, Gu, hu)
 	penalty := core.NewConstraintPenalty(G, hOfX0, "indicator")
 
-	// Variational MPC parameters.
-	if cfg.Sigma0 <= 0 || cfg.LambdaParam <= 0 {
-		panic("invalid sigma0 or lambda in output/ckks_config.json; set positive values")
-	}
+	// Variational MPC parameters
 	sigma0 := cfg.Sigma0
 	Sigma0 := scaledIdentity(mpc.StackedInputDim(), sigma0*sigma0)
 	lambdaParam := cfg.LambdaParam
@@ -110,25 +82,27 @@ func main() {
 	// Cache sizes (samples per packed ciphertext).
 	K := cfg.K
 	T := cfg.T
-	if K <= 0 || T <= 0 {
-		panic("invalid K or T in output/ckks_config.json; set positive values in main.ipynb")
+	nWorkers := cfg.NWorkers
+	if nWorkers <= 0 {
+		nWorkers = 1
 	}
+	if K%nWorkers != 0 {
+		panic("K must be divisible by nWorkers in output/ckks_config.json")
+	}
+	KChunk := K / nWorkers
 	slotWidth := maxInt(dim, p)
-	slotsNeeded := slotWidth * K
-	fmt.Printf("Slot width: %d, slots needed: %d\n", slotWidth, slotsNeeded)
+	slotsNeeded := slotWidth * KChunk
+	fmt.Printf("Slot width: %d, slots needed per worker: %d\n", slotWidth, slotsNeeded)
 
 	// CKKS parameters (relaxed security for speed).
 	logN := cfg.LogN
-	if logN <= 0 {
-		panic("invalid logN in output/ckks_config.json; set a positive value in main.ipynb")
-	}
 	if (1 << (logN - 1)) < slotsNeeded {
 		panic("logN too small for required slots; increase logN or reduce K")
 	}
 	logQ := cfg.LogQ
 	logP := cfg.LogP
 	logDefaultScale := cfg.LogDefaultScale
-	
+
 	paramsLit := ckks.ParametersLiteral{
 		LogN:            logN,
 		LogQ:            logQ,
@@ -141,11 +115,9 @@ func main() {
 	if dim > slots || p > slots {
 		panic("dim or p exceeds CKKS slots; increase LogN or reduce N")
 	}
-	if slots < slotWidth*K {
-		panic("not enough slots to pack K samples; increase logN or reduce K")
+	if slots < slotWidth*KChunk {
+		panic("not enough slots to pack K_chunk samples; increase logN or reduce K or nWorkers")
 	}
-	// Change this if implementing parallel workers
-	KChunk := K
 	cacheDir := filepath.Join("output", "ckks_cache")
 	cryptoDir := filepath.Join(cacheDir, "crypto")
 	_ = os.MkdirAll(cryptoDir, 0o755)
@@ -177,8 +149,6 @@ func main() {
 
 	encoder := ckks.NewEncoder(params)
 	encryptor := ckks.NewEncryptor(params, pk)
-	decryptor := ckks.NewDecryptor(params, sk)
-	evaluator := ckks.NewEvaluator(params, evalKeys)
 
 	// Client offline: encrypt cyclic diagonals of L_U and Gamma.
 	encLU := encryptCyclicDiagonalsSquare(LU, dim, slots, encoder, encryptor, params)
@@ -187,72 +157,77 @@ func main() {
 
 	fmt.Printf("L_U dims: %dx%d\n", rLU, cLU)
 	fmt.Printf("Gamma dims: %dx%d\n", rG, cG)
-	fmt.Printf("CKKS slots: %d, K_chunk: %d, T: %d\n", slots, KChunk, T)
+	fmt.Printf("CKKS slots: %d, K: %d, nWorkers: %d, K_chunk: %d, T: %d\n", slots, K, nWorkers, KChunk, T)
 
-	// Cloud offline: sample xi, compute Enc(LU * xi) and Enc(Gamma * xi), then pack.
+	// Cloud offline: each worker samples KChunk xi values, computes Enc(LU * xi)
+	// and Enc(Gamma * xi), packs them, and writes its own cache files.
 	cloudStart := time.Now()
-	maxErrLU := 0.0
-	maxErrGamma := 0.0
-
-	rng := rand.New(rand.NewSource(0))
-	decBuf := make([]complex128, slots)
-
-	maskLU := makeMaskPlaintext(dim, slots, params, encoder)
-	maskG := makeMaskPlaintext(p, slots, params, encoder)
-
-	cacheLU := make([]*rlwe.Ciphertext, T)
-	cacheG := make([]*rlwe.Ciphertext, T)
-
-	ctLUList := make([]*rlwe.Ciphertext, KChunk)
-	ctGList := make([]*rlwe.Ciphertext, KChunk)
-	xi := make([]float64, dim)
-	xiPad := make([]float64, p)
-
-	for t := 0; t < T; t++ {
-		for s := 0; s < KChunk; s++ {
-			for i := 0; i < dim; i++ {
-				xi[i] = rng.NormFloat64()
+	var wg sync.WaitGroup
+	errCh := make(chan error, nWorkers)
+	for workerID := 0; workerID < nWorkers; workerID++ {
+		workerID := workerID
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			workerDir := cacheDir
+			if nWorkers > 1 {
+				workerDir = filepath.Join(cacheDir, fmt.Sprintf("worker_%d", workerID))
 			}
-			copy(xiPad, xi)
-
-			// Cyclic diagonal encryption
-			ctLU := encMatVec(encLU, xi, dim, slots, params, encoder, evaluator)
-			ctG := encMatVec(encGamma, xiPad, p, slots, params, encoder, evaluator)
-
-			errLU := decryptMaxAbsErrorVec(ctLU, LU, xi, dim, decBuf, encoder, decryptor)
-			if errLU > maxErrLU {
-				maxErrLU = errLU
-			}
-			errG := decryptMaxAbsErrorVec(ctG, &Gamma, xi, p, decBuf, encoder, decryptor)
-			if errG > maxErrGamma {
-				maxErrGamma = errG
+			if err := os.MkdirAll(workerDir, 0o755); err != nil {
+				errCh <- err
+				return
 			}
 
-			ctLUList[s] = ctLU
-			ctGList[s] = ctG
+			workerEncoder := ckks.NewEncoder(params)
+			workerEvaluator := ckks.NewEvaluator(params, evalKeys)
+			maskLU := makeMaskPlaintext(dim, slots, params, workerEncoder)
+			maskG := makeMaskPlaintext(p, slots, params, workerEncoder)
+			scratchLU := newEncMatVecScratch(dim, slots, params)
+			scratchG := newEncMatVecScratch(p, slots, params)
+			rng := rand.New(rand.NewSource(int64(workerID + 1)))
+
+			ctLUList := make([]*rlwe.Ciphertext, KChunk)
+			ctGList := make([]*rlwe.Ciphertext, KChunk)
+			xi := make([]float64, dim)
+			xiPad := make([]float64, p)
+
+			for t := 0; t < T; t++ {
+				for s := 0; s < KChunk; s++ {
+					for i := 0; i < dim; i++ {
+						xi[i] = rng.NormFloat64()
+					}
+					copy(xiPad, xi)
+
+					ctLUList[s] = encMatVec(encLU, xi, dim, workerEncoder, workerEvaluator, scratchLU)
+					ctGList[s] = encMatVec(encGamma, xiPad, p, workerEncoder, workerEvaluator, scratchG)
+				}
+
+				cacheLU := packCiphertexts(ctLUList, dim, slots, maskLU, workerEvaluator)
+				cacheG := packCiphertexts(ctGList, p, slots, maskG, workerEvaluator)
+
+				if err := writeCiphertext(workerCachePath(workerDir, "ct_Lu", t), cacheLU); err != nil {
+					errCh <- err
+					return
+				}
+				if err := writeCiphertext(workerCachePath(workerDir, "ct_Gamma", t), cacheG); err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			panic(err)
 		}
-
-		cacheLU[t] = packCiphertexts(ctLUList, dim, slots, maskLU, evaluator)
-		cacheG[t] = packCiphertexts(ctGList, p, slots, maskG, evaluator)
 	}
 	cloudMs := time.Since(cloudStart).Seconds() * 1000.0
-	_ = os.MkdirAll(cacheDir, 0o755)
-	for t := 0; t < T; t++ {
-		if err := writeCiphertext(filepath.Join(cacheDir, fmt.Sprintf("ct_Lu_%04d.bin", t)), cacheLU[t]); err != nil {
-			panic(err)
-		}
-		if err := writeCiphertext(filepath.Join(cacheDir, fmt.Sprintf("ct_Gamma_%04d.bin", t)), cacheG[t]); err != nil {
-			panic(err)
-		}
-	}
 
-	fmt.Printf("Cache Enc(L_U * xi): T=%d, packed=%d samples per ct\n", T, KChunk)
-	fmt.Printf("Cache Enc(Gamma * xi): T=%d, packed=%d samples per ct\n", T, KChunk)
-	fmt.Printf("Saved cache to %s\n", cacheDir)
-	fmt.Printf("Saved params/keys to %s\n", cryptoDir)
+	fmt.Printf("Cache Enc(L_U * xi): T=%d, workers=%d, packed=%d samples per ct\n", T, nWorkers, KChunk)
+	fmt.Printf("Cache Enc(Gamma * xi): T=%d, workers=%d, packed=%d samples per ct\n", T, nWorkers, KChunk)
 
-	fmt.Printf("Max abs error (L_U * xi): %.3e\n", maxErrLU)
-	fmt.Printf("Max abs error (Gamma * xi): %.3e\n", maxErrGamma)
 	fmt.Printf("Client offline time: %.3f ms\n", clientMs)
 	fmt.Printf("Cloud offline time: %.3f ms\n", cloudMs)
 }
@@ -279,7 +254,6 @@ func encryptCyclicDiagonalsSquare(
 	}
 	return out
 }
-
 
 func encryptCyclicDiagonalsGamma(
 	gamma *mat.Dense,
@@ -311,30 +285,24 @@ func encryptCyclicDiagonalsGamma(
 	return out
 }
 
-
 func encMatVec(
 	ctDiags []*rlwe.Ciphertext,
 	xi []float64,
 	vecLen int,
-	slots int,
-	params ckks.Parameters,
 	encoder *ckks.Encoder,
 	evaluator *ckks.Evaluator,
+	scratch *encMatVecScratch,
 ) *rlwe.Ciphertext {
 	var acc *rlwe.Ciphertext
-	vals := make([]complex128, slots)
-	pt := ckks.NewPlaintext(params, params.MaxLevel())
-	pt.Scale = params.DefaultScale()
-	rot := make([]float64, vecLen)
 	// Rotate vector and multiply with each encryption of cyclic diagonal
 	// Then, add them.
 	for k, ctDiag := range ctDiags {
-		rotateVectorInto(rot, xi, k)
-		for i := 0; i < vecLen && i < len(rot); i++ {
-			vals[i] = complex(rot[i], 0)
+		rotateVectorInto(scratch.rot, xi, k)
+		for i := 0; i < vecLen && i < len(scratch.rot); i++ {
+			scratch.vals[i] = complex(scratch.rot[i], 0)
 		}
-		_ = encoder.Encode(vals, pt)
-		term, _ := evaluator.MulNew(ctDiag, pt)
+		_ = encoder.Encode(scratch.vals, scratch.pt)
+		term, _ := evaluator.MulNew(ctDiag, scratch.pt)
 		_ = evaluator.Rescale(term, term)
 		if acc == nil {
 			acc = term
@@ -345,6 +313,21 @@ func encMatVec(
 	return acc
 }
 
+type encMatVecScratch struct {
+	vals []complex128
+	rot  []float64
+	pt   *rlwe.Plaintext
+}
+
+func newEncMatVecScratch(vecLen, slots int, params ckks.Parameters) *encMatVecScratch {
+	pt := ckks.NewPlaintext(params, params.MaxLevel())
+	pt.Scale = params.DefaultScale()
+	return &encMatVecScratch{
+		vals: make([]complex128, slots),
+		rot:  make([]float64, vecLen),
+		pt:   pt,
+	}
+}
 
 func rotateVectorInto(dst, vec []float64, k int) {
 	n := len(vec)
@@ -479,6 +462,10 @@ func writeCiphertext(path string, ct *rlwe.Ciphertext) error {
 
 func writeBinary(path string, data []byte) error {
 	return os.WriteFile(path, data, 0o644)
+}
+
+func workerCachePath(baseDir, prefix string, t int) string {
+	return filepath.Join(baseDir, fmt.Sprintf("%s_%04d.bin", prefix, t))
 }
 
 func diagDense(vals []float64) *mat.Dense {

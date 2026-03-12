@@ -7,15 +7,16 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/tuneinsight/lattigo/v6/core/rlwe"
 	"github.com/tuneinsight/lattigo/v6/schemes/ckks"
 	"gonum.org/v1/gonum/mat"
 
-	"govempc/internal/ckksconfig"
 	"govempc/core"
 	"govempc/examples"
+	"govempc/internal/ckksconfig"
 	"govempc/solvers"
 )
 
@@ -97,18 +98,17 @@ func main() {
 	if chebOrder <= 0 || chebBound <= 0 || chebEta <= 0 {
 		panic("invalid cheb parameters in output/ckks_config.json; set chebOrder/chebBound/chebEta in main.ipynb")
 	}
-
-	// Variational MPC parameters.
-	if cfg.Sigma0 <= 0 || cfg.LambdaParam <= 0 {
-		panic("invalid sigma0 or lambda in output/ckks_config.json; set positive values")
-	}
 	sigma0 := cfg.Sigma0
 	Sigma0 := scaledIdentity(mpc.StackedInputDim(), sigma0*sigma0)
 	lambdaParam := cfg.LambdaParam
 	K := cfg.K
 	T := cfg.T
-	if K <= 0 || T <= 0 {
-		panic("invalid K or T in output/ckks_config.json; set positive values in main.ipynb")
+	nWorkers := cfg.NWorkers
+	if nWorkers <= 0 {
+		nWorkers = 1
+	}
+	if K%nWorkers != 0 {
+		panic("K must be divisible by nWorkers in output/ckks_config.json")
 	}
 
 	// ---- Client offline preprocessing (Algorithm 1: steps 1-4) ----
@@ -135,62 +135,48 @@ func main() {
 	}
 
 	slotWidth := maxInt(dim, p)
-	maxPacked := slots / slotWidth
-	if maxPacked < 1 {
-		panic("slotWidth exceeds CKKS slots; cannot pack any samples")
+	KChunk := K / nWorkers
+	if KChunk < 1 {
+		panic("K_chunk must be positive")
 	}
-	KChunk := K
-	if KChunk > maxPacked {
-		fmt.Printf("Reducing K from %d to %d to fit in one ciphertext (slots=%d, width=%d)\n", KChunk, maxPacked, slots, slotWidth)
-		KChunk = maxPacked
+	if slots < slotWidth*KChunk {
+		panic("not enough slots to process K_chunk samples; increase logN or reduce K or nWorkers")
 	}
 
-	// Rotation keys for summing constraint slots within each p-block.
-	var gks []*rlwe.GaloisKey
-	if p > 1 {
-		kgen := ckks.NewKeyGenerator(params)
-		gks = make([]*rlwe.GaloisKey, 0, p-1)
-		for r := 1; r < p; r++ {
-			gks = append(gks, kgen.GenGaloisKeyNew(params.GaloisElementForRotation(r), sk))
-		}
+	logW := make([]float64, K)
+	kgen := ckks.NewKeyGenerator(params)
+	rotations := collectOnlineRotations(KChunk, dim, p, slots)
+	gks := make([]*rlwe.GaloisKey, 0, len(rotations))
+	for _, rot := range rotations {
+		gks = append(gks, kgen.GenGaloisKeyNew(params.GaloisElementForRotation(rot), sk))
 	}
-
-	encoder := ckks.NewEncoder(params)
-	encryptor := ckks.NewEncryptor(params, pk)
-	decryptor := ckks.NewDecryptor(params, sk)
 	evalKeys := rlwe.NewMemEvaluationKeySet(rlk, gks...)
-	evaluator := ckks.NewEvaluator(params, evalKeys)
-
-	// Reuse decode buffer to reduce allocations.
-	decBuf := make([]complex128, slots)
-	decS := make([]complex128, slots)
-	logW := make([]float64, KChunk)
-	defaultScale := params.DefaultScale()
-
-	// Mask to keep the first slot of each p-block after summing constraints.
-	maskVals := make([]complex128, slots)
-	for i := 0; i < KChunk; i++ {
-		idx := i * p
-		if idx < slots {
-			maskVals[idx] = complex(1.0, 0)
-		}
-	}
-	var maskPt *rlwe.Plaintext
-
-	// Reuse buffers for plaintext packing.
-	valsMU := make([]complex128, slots)
-	valsB := make([]complex128, slots)
-	var ptMU *rlwe.Plaintext
-	var ptB *rlwe.Plaintext
-
-	cache := newCipherCache(cacheDir)
 
 	// Precompute polynomial coefficients in power basis (z-domain).
 	// We evaluate h_l on encrypted g values using Horner's rule.
 	chebCoeffs := solvers.ChebyshevReLUCoeffs(chebOrder, chebBound, 0)
 	polyT := chebToPower(chebCoeffs)
 	polyZ := scalePoly(polyT, chebBound)
-	threshold := polyZ[0]
+	// Match the plain variational controller threshold using delta_l = h_l(0).
+	deltaL := evalPolyReal(polyZ, 0.0)
+	tauS := float64(p) * deltaL
+
+	workers := make([]*onlineWorker, nWorkers)
+	for w := 0; w < nWorkers; w++ {
+		workers[w] = newOnlineWorker(
+			workerCacheDir(cacheDir, w, nWorkers),
+			KChunk,
+			dim,
+			p,
+			slots,
+			params,
+			pk,
+			sk,
+			evalKeys,
+			polyZ,
+			tauS,
+		)
+	}
 
 	// ---- Online protocol (Algorithm 2) ----
 	// We simulate T time steps to produce a trajectory.
@@ -204,84 +190,70 @@ func main() {
 		xs.Set(0, j, x[j])
 	}
 
+	// Threshold 함수 확인
+
 	cloudMsSeries := make([]float64, T)
 	Uhat := make([]float64, Nm)
-	uHatScratch := make([]float64, Nm)
 
 	for t := 0; t < T; t++ {
 		// Client: compute and encrypt m_U(x_t), b(x_t).
 		mU := computeMU(variational, x)
 		b := computeB(penalty, mU, x)
 
-		ctLu := cache.Load("ct_Lu", t)
-		ctGamma := cache.Load("ct_Gamma", t)
-
-		if ptMU == nil || ptMU.Level() != ctLu.Level() {
-			ptMU = ckks.NewPlaintext(params, ctLu.Level())
+		var wg sync.WaitGroup
+		errCh := make(chan error, nWorkers)
+		for _, worker := range workers {
+			worker := worker
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := worker.runCycle(t, mU, b); err != nil {
+					errCh <- err
+				}
+			}()
 		}
-		if ptB == nil || ptB.Level() != ctGamma.Level() {
-			ptB = ckks.NewPlaintext(params, ctGamma.Level())
+		wg.Wait()
+		close(errCh)
+		for err := range errCh {
+			if err != nil {
+				panic(err)
+			}
 		}
 
-		ctMU := tileEncryptVector(mU, dim, KChunk, slots, encoder, encryptor, ptMU, valsMU, defaultScale)
-		ctB := tileEncryptVector(b, p, KChunk, slots, encoder, encryptor, ptB, valsB, defaultScale)
-
-		// Cloud: compute Enc(U) and Enc(s_l) on packed slots.
-		cloudStart := time.Now()
-		ctU, _ := evaluator.AddNew(ctMU, ctLu)
-		ctG, _ := evaluator.AddNew(ctB, ctGamma)
-		ctS := evalPoly(ctG, polyZ, evaluator)
-		// Sum constraint penalties within each p-block and keep only the first slot.
-		if maskPt == nil || maskPt.Level() != ctS.Level() {
-			maskPt = ckks.NewPlaintext(params, ctS.Level())
-			maskPt.Scale = defaultScale
-			_ = encoder.Encode(maskVals, maskPt)
+		cloudMs := 0.0
+		for _, worker := range workers {
+			if worker.cloudMs > cloudMs {
+				cloudMs = worker.cloudMs
+			}
 		}
-		ctS = sumWithinBlocks(ctS, p, maskPt, evaluator)
-		cloudMs := time.Since(cloudStart).Seconds() * 1000.0
 		cloudMsSeries[t] = cloudMs
 		fmt.Printf("step %d cloud_ms %.3f\n", t, cloudMs)
 
-		// Client: decrypt packed U and s, then aggregate.
-		ptU := decryptor.DecryptNew(ctU)
-		_ = encoder.Decode(ptU, decBuf)
-
-		ptS := decryptor.DecryptNew(ctS)
-		// decS buffer reused
-		_ = encoder.Decode(ptS, decS)
-
-		// Reset accumulator.
+		// Client: aggregate all worker chunks with global log-sum-exp stabilization.
 		for j := 0; j < Nm; j++ {
 			Uhat[j] = 0.0
 		}
 
-		// Compute weights with log-sum-exp stabilization.
-		// logW buffer reused
 		logWMax := math.Inf(-1)
-		for i := 0; i < KChunk; i++ {
-			s := real(decS[i*p])
-			if s < threshold {
-				s = 0.0
-			}
-			logW[i] = -chebEta * s
-			if logW[i] > logWMax {
-				logWMax = logW[i]
+		for w, worker := range workers {
+			base := w * KChunk
+			for i := 0; i < KChunk; i++ {
+				logW[base+i] = -chebEta * worker.sVals[i]
+				if logW[base+i] > logWMax {
+					logWMax = logW[base+i]
+				}
 			}
 		}
 		var wSum float64
-		for i := 0; i < KChunk; i++ {
-			w := math.Exp(logW[i] - logWMax)
-			wSum += w
-			off := i * dim
-			for j := 0; j < Nm; j++ {
-				if off+j < slots {
-					uHatScratch[j] = real(decBuf[off+j])
-				} else {
-					uHatScratch[j] = 0.0
+		for w, worker := range workers {
+			base := w * KChunk
+			for i := 0; i < KChunk; i++ {
+				wi := math.Exp(logW[base+i] - logWMax)
+				wSum += wi
+				off := i * dim
+				for j := 0; j < Nm; j++ {
+					Uhat[j] += wi * worker.uFlat[off+j]
 				}
-			}
-			for j := 0; j < Nm; j++ {
-				Uhat[j] += w * uHatScratch[j]
 			}
 		}
 		if wSum > 0 {
@@ -310,6 +282,7 @@ func main() {
 	fmt.Printf("L_U dims: %dx%d\n", rLU, dim)
 	fmt.Printf("Gamma dims: %dx%d\n", rG, dim)
 	fmt.Printf("CKKS slots: %d\n", slots)
+	fmt.Printf("K: %d, nWorkers: %d, K_chunk: %d\n", K, nWorkers, KChunk)
 	fmt.Printf("Packed samples per ct: %d (slotWidth=%d)\n", KChunk, slotWidth)
 	fmt.Printf("Cache dir: %s\n", cacheDir)
 	fmt.Printf("Online cloud time mean/std: %.3f ms / %.3f ms\n", cloudMean, cloudStd)
@@ -375,6 +348,127 @@ func loadCrypto(dir string) (ckks.Parameters, *rlwe.SecretKey, *rlwe.PublicKey, 
 	return params, sk, pk, rlk
 }
 
+type onlineWorker struct {
+	cache        *cipherCache
+	encoder      *ckks.Encoder
+	encryptor    *rlwe.Encryptor
+	decryptor    *rlwe.Decryptor
+	evaluator    *ckks.Evaluator
+	ptMU         *rlwe.Plaintext
+	ptB          *rlwe.Plaintext
+	valsMU       []complex128
+	valsB        []complex128
+	decU         []complex128
+	decS         []complex128
+	uFlat        []float64
+	sVals        []float64
+	polyZ        []float64
+	scoreMask    *rlwe.Plaintext
+	scoreMaskBuf []complex128
+	tauS         float64
+	dim          int
+	p            int
+	kChunk       int
+	slots        int
+	defaultScale rlwe.Scale
+	cloudMs      float64
+	params       ckks.Parameters
+}
+
+func newOnlineWorker(
+	cacheDir string,
+	kChunk int,
+	dim int,
+	p int,
+	slots int,
+	params ckks.Parameters,
+	pk *rlwe.PublicKey,
+	sk *rlwe.SecretKey,
+	evalKeys *rlwe.MemEvaluationKeySet,
+	polyZ []float64,
+	tauS float64,
+) *onlineWorker {
+	return &onlineWorker{
+		cache:        newCipherCache(cacheDir),
+		encoder:      ckks.NewEncoder(params),
+		encryptor:    ckks.NewEncryptor(params, pk),
+		decryptor:    ckks.NewDecryptor(params, sk),
+		evaluator:    ckks.NewEvaluator(params, evalKeys),
+		valsMU:       make([]complex128, slots),
+		valsB:        make([]complex128, slots),
+		decU:         make([]complex128, slots),
+		decS:         make([]complex128, slots),
+		uFlat:        make([]float64, kChunk*dim),
+		sVals:        make([]float64, kChunk),
+		polyZ:        polyZ,
+		scoreMaskBuf: make([]complex128, slots),
+		tauS:         tauS,
+		dim:          dim,
+		p:            p,
+		kChunk:       kChunk,
+		slots:        slots,
+		defaultScale: params.DefaultScale(),
+		params:       params,
+	}
+}
+
+func (w *onlineWorker) runCycle(t int, mU []float64, b []float64) error {
+	ctLu := w.cache.Load("ct_Lu", t)
+	ctGamma := w.cache.Load("ct_Gamma", t)
+
+	if w.ptMU == nil || w.ptMU.Level() != ctLu.Level() {
+		w.ptMU = ckks.NewPlaintext(w.params, ctLu.Level())
+	}
+	if w.ptB == nil || w.ptB.Level() != ctGamma.Level() {
+		w.ptB = ckks.NewPlaintext(w.params, ctGamma.Level())
+	}
+
+	ctMU := tileEncryptVector(mU, w.dim, w.kChunk, w.slots, w.encoder, w.encryptor, w.ptMU, w.valsMU, w.defaultScale)
+	ctB := tileEncryptVector(b, w.p, w.kChunk, w.slots, w.encoder, w.encryptor, w.ptB, w.valsB, w.defaultScale)
+
+	cloudStart := time.Now()
+	ctU, err := w.evaluator.AddNew(ctMU, ctLu)
+	if err != nil {
+		return err
+	}
+	ctG, err := w.evaluator.AddNew(ctB, ctGamma)
+	if err != nil {
+		return err
+	}
+	ctPoly := evalPoly(ctG, w.polyZ, w.evaluator)
+	if ctPoly == nil {
+		return fmt.Errorf("nil ciphertext after polynomial evaluation")
+	}
+	if w.scoreMask == nil || w.scoreMask.Level() != ctPoly.Level() {
+		w.scoreMask = makeFirstSlotMaskPlaintext(w.p, w.kChunk, w.slots, w.params, ctPoly.Level(), w.encoder, w.scoreMaskBuf)
+	}
+	ctS := sumWithinBlocks(ctPoly, w.p, w.scoreMask, w.evaluator)
+	w.cloudMs = time.Since(cloudStart).Seconds() * 1000.0
+
+	ptU := w.decryptor.DecryptNew(ctU)
+	if err := w.encoder.Decode(ptU, w.decU); err != nil {
+		return err
+	}
+	ptS := w.decryptor.DecryptNew(ctS)
+	if err := w.encoder.Decode(ptS, w.decS); err != nil {
+		return err
+	}
+
+	for i := 0; i < w.kChunk; i++ {
+		uOff := i * w.dim
+		for j := 0; j < w.dim; j++ {
+			w.uFlat[uOff+j] = real(w.decU[uOff+j])
+		}
+		score := real(w.decS[i*w.p])
+		score -= w.tauS
+		if score < 0 {
+			score = 0
+		}
+		w.sVals[i] = score
+	}
+	return nil
+}
+
 type cipherCache struct {
 	dir   string
 	ctMap map[string]*rlwe.Ciphertext
@@ -419,6 +513,12 @@ func (c *cipherCache) Load(prefix string, t int) *rlwe.Ciphertext {
 	return ct
 }
 
+func workerCacheDir(baseDir string, workerID int, nWorkers int) string {
+	if nWorkers <= 1 {
+		return baseDir
+	}
+	return filepath.Join(baseDir, fmt.Sprintf("worker_%d", workerID))
+}
 
 func tileEncryptVector(
 	vec []float64,
@@ -457,12 +557,84 @@ func tileEncryptVector(
 	return ct
 }
 
+func makeFirstSlotMaskPlaintext(
+	blockSize int,
+	kChunk int,
+	slots int,
+	params ckks.Parameters,
+	level int,
+	encoder *ckks.Encoder,
+	buf []complex128,
+) *rlwe.Plaintext {
+	for i := range buf {
+		buf[i] = 0
+	}
+	if blockSize <= 0 {
+		blockSize = 1
+	}
+	for i := 0; i < kChunk; i++ {
+		off := i * blockSize
+		if off >= slots {
+			break
+		}
+		buf[off] = complex(1.0, 0)
+	}
+	pt := ckks.NewPlaintext(params, level)
+	pt.Scale = params.DefaultScale()
+	_ = encoder.Encode(buf, pt)
+	return pt
+}
+
+func collectOnlineRotations(kChunk, dim, p, slots int) []int {
+	rotSet := make(map[int]struct{})
+	for _, r := range collectPackRotations(kChunk, dim, p, slots) {
+		rotSet[r] = struct{}{}
+	}
+	for r := 1; r < p; r++ {
+		rotSet[r] = struct{}{}
+	}
+	rots := make([]int, 0, len(rotSet))
+	for r := range rotSet {
+		rots = append(rots, r)
+	}
+	return rots
+}
+
+func collectPackRotations(kChunk, dim, p, slots int) []int {
+	if kChunk <= 1 {
+		return nil
+	}
+	rotSet := make(map[int]struct{})
+	for k := 1; k < kChunk; k++ {
+		r1 := mod(-k*dim, slots)
+		if r1 != 0 {
+			rotSet[r1] = struct{}{}
+		}
+		r2 := mod(-k*p, slots)
+		if r2 != 0 {
+			rotSet[r2] = struct{}{}
+		}
+	}
+	rots := make([]int, 0, len(rotSet))
+	for r := range rotSet {
+		rots = append(rots, r)
+	}
+	return rots
+}
 
 func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}
 	return b
+}
+
+func mod(a, b int) int {
+	r := a % b
+	if r < 0 {
+		r += b
+	}
+	return r
 }
 
 func sumWithinBlocks(
@@ -489,7 +661,6 @@ func sumWithinBlocks(
 	_ = eval.Rescale(ctMasked, ctMasked)
 	return ctMasked
 }
-
 
 func evalPoly(ctX *rlwe.Ciphertext, coeffs []float64, eval *ckks.Evaluator) *rlwe.Ciphertext {
 	// Evaluate polynomial in power basis using Horner's rule.
@@ -682,6 +853,34 @@ func scalePoly(poly []float64, bound float64) []float64 {
 		pow *= bound
 	}
 	return out
+}
+
+func evalPolyReal(coeffs []float64, x float64) float64 {
+	// Evaluate a real polynomial in power basis at x (Horner's rule).
+	y := 0.0
+	for k := len(coeffs) - 1; k >= 0; k-- {
+		y = y*x + coeffs[k]
+	}
+	return y
+}
+
+func approxReLUError(polyZ []float64, bound float64, samples int) float64 {
+	// Approximate delta_l = sup_{z in [-bound,bound]} |[z]_+ - h_l(z)|.
+	if bound <= 0 || samples < 2 {
+		return 0.0
+	}
+	step := 2.0 * bound / float64(samples-1)
+	maxErr := 0.0
+	for i := 0; i < samples; i++ {
+		z := -bound + step*float64(i)
+		relu := math.Max(z, 0.0)
+		approx := evalPolyReal(polyZ, z)
+		err := math.Abs(relu - approx)
+		if err > maxErr {
+			maxErr = err
+		}
+	}
+	return maxErr
 }
 
 func nextPow2(n int) int {

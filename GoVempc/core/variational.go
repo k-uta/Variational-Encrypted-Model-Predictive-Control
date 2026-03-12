@@ -184,25 +184,14 @@ func (v *VariationalMPC) ComputeWeights(U *mat.Dense, x0 []float64, opts WeightO
 
 // chebReLU evaluates the Chebyshev approximation of ReLU on each residual:
 // h_l(gamma) ≈ max(0, gamma) using coeffs fitted on t in [-1,1] for B*[t]_+.
-func chebReLU(residuals *mat.Dense, coeffs []float64, bound float64, clip bool) *mat.Dense {
-	// Map residuals into [-1,1], evaluate Chebyshev series, optionally clip negatives.
+func chebReLU(residuals *mat.Dense, coeffs []float64, bound float64, _ bool) *mat.Dense {
+	// Scale residuals by the fit interval and evaluate the Chebyshev series directly.
 	r, c := residuals.Dims()
 	out := mat.NewDense(r, c, nil)
 	for i := 0; i < r; i++ {
 		for j := 0; j < c; j++ {
 			t := residuals.At(i, j) / bound
-			if clip {
-				if t < -1.0 {
-					t = -1.0
-				}
-				if t > 1.0 {
-					t = 1.0
-				}
-			}
 			y := chebVal(t, coeffs)
-			if clip && y < 0.0 {
-				y = 0.0
-			}
 			out.Set(i, j, y)
 		}
 	}

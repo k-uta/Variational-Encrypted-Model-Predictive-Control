@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/csv"
-	"encoding/json"
 	"fmt"
 	"image/color"
 	"math"
@@ -20,80 +19,60 @@ import (
 
 	"govempc/core"
 	"govempc/examples"
+	"govempc/internal/ckksconfig"
 	"govempc/solvers"
 )
 
 func main() {
 	rand.Seed(0)
 
-	// Optional: load shared config written by cmd/test/main.ipynb
+	// Load shared config written by cmd/test/main.ipynb.
 	cfgPath := filepath.Join("output", "ckks_config.json")
-	cfg, cfgOK := loadConfig(cfgPath)
-
-	// Defaults (used if no config is present).
-	m, l, g := 0.2, 0.5, 9.81
-	dt := 0.01
-	N := 10
-	TSteps := 1000
-	QDiag := []float64{50.0, 5.0}
-	RDiag := []float64{0.1}
-	QfScale := 2.0
-
-	// Constraints
-	thetaMax := 0.35
-	omegaMax := 4.0
-	uMax := 2.0
-
-	// Variational MPC parameters
-	sigma0 := 0.25
-	KSamples := 100
-	lambdaPlot := 0.1
-	chebOrder := 3
-	chebBound := 20.0
-	chebEta := 200.0
-	chebClip := true
-
-	if cfgOK {
-		if cfg.Mass <= 0 || cfg.Length <= 0 || cfg.Gravity <= 0 || cfg.DT <= 0 || cfg.N <= 0 {
-			panic("invalid model parameters in output/ckks_config.json; set m, l, g, dt, N")
-		}
-		m, l, g = cfg.Mass, cfg.Length, cfg.Gravity
-		dt = cfg.DT
-		N = cfg.N
-		if cfg.TSteps > 0 {
-			TSteps = cfg.TSteps
-		} else if cfg.T > 0 {
-			TSteps = cfg.T
-		}
-		if cfg.QfScale <= 0 {
-			panic("invalid QfScale in output/ckks_config.json")
-		}
-		QDiag = cfg.QDiag
-		RDiag = cfg.RDiag
-		QfScale = cfg.QfScale
-		if cfg.ThetaMax <= 0 || cfg.OmegaMax <= 0 || cfg.UMax <= 0 {
-			panic("invalid constraint bounds in output/ckks_config.json; set thetaMax/omegaMax/uMax")
-		}
-		thetaMax = cfg.ThetaMax
-		omegaMax = cfg.OmegaMax
-		uMax = cfg.UMax
-
-		if cfg.Sigma0 <= 0 || cfg.LambdaParam <= 0 {
-			panic("invalid sigma0 or lambda in output/ckks_config.json")
-		}
-		sigma0 = cfg.Sigma0
-		lambdaPlot = cfg.LambdaParam
-		if cfg.K <= 0 {
-			panic("invalid K in output/ckks_config.json")
-		}
-		KSamples = cfg.K
-		if cfg.ChebOrder <= 0 || cfg.ChebBound <= 0 || cfg.ChebEta <= 0 {
-			panic("invalid cheb parameters in output/ckks_config.json")
-		}
-		chebOrder = cfg.ChebOrder
-		chebBound = cfg.ChebBound
-		chebEta = cfg.ChebEta
+	cfg, ok := ckksconfig.Load(cfgPath)
+	if !ok {
+		panic("missing output/ckks_config.json; run the config cell in cmd/test/main.ipynb")
 	}
+	if cfg.Mass <= 0 || cfg.Length <= 0 || cfg.Gravity <= 0 || cfg.DT <= 0 || cfg.N <= 0 {
+		panic("invalid model parameters in output/ckks_config.json; set m, l, g, dt, N")
+	}
+	if cfg.QfScale <= 0 {
+		panic("invalid QfScale in output/ckks_config.json")
+	}
+	if cfg.ThetaMax <= 0 || cfg.OmegaMax <= 0 || cfg.UMax <= 0 {
+		panic("invalid constraint bounds in output/ckks_config.json; set thetaMax/omegaMax/uMax")
+	}
+	if cfg.Sigma0 <= 0 || cfg.LambdaParam <= 0 {
+		panic("invalid sigma0 or lambda in output/ckks_config.json")
+	}
+	if cfg.K <= 0 {
+		panic("invalid K in output/ckks_config.json")
+	}
+	if cfg.ChebOrder <= 0 || cfg.ChebBound <= 0 || cfg.ChebEta <= 0 {
+		panic("invalid cheb parameters in output/ckks_config.json")
+	}
+
+	m, l, g := cfg.Mass, cfg.Length, cfg.Gravity
+	dt := cfg.DT
+	N := cfg.N
+	TSteps := cfg.TSteps
+	if TSteps <= 0 {
+		TSteps = cfg.T
+	}
+	if TSteps <= 0 {
+		panic("invalid TSteps/T in output/ckks_config.json")
+	}
+	QDiag := cfg.QDiag
+	RDiag := cfg.RDiag
+	QfScale := cfg.QfScale
+	thetaMax := cfg.ThetaMax
+	omegaMax := cfg.OmegaMax
+	uMax := cfg.UMax
+	sigma0 := cfg.Sigma0
+	KSamples := cfg.K
+	lambdaPlot := cfg.LambdaParam
+	chebOrder := cfg.ChebOrder
+	chebBound := cfg.ChebBound
+	chebEta := cfg.ChebEta
 
 	// System Define
 	Ac, Bc := examples.LinearizedInvertedPendulumContinuous(m, l, g)
@@ -102,13 +81,11 @@ func main() {
 	n, _ := A.Dims()
 	_, mIn := B.Dims()
 
-	if cfgOK {
-		if len(QDiag) != n {
-			panic("QDiag length must match state dimension in output/ckks_config.json")
-		}
-		if len(RDiag) != mIn {
-			panic("RDiag length must match input dimension in output/ckks_config.json")
-		}
+	if len(QDiag) != n {
+		panic("QDiag length must match state dimension in output/ckks_config.json")
+	}
+	if len(RDiag) != mIn {
+		panic("RDiag length must match input dimension in output/ckks_config.json")
 	}
 
 	Q := diagDense(QDiag)
@@ -141,7 +118,10 @@ func main() {
 		return u, Useq, nil
 	}
 
-	x0 := []float64{0.20, 0.0}
+	if len(cfg.X0) != n {
+		panic("x0 length must match state dimension in output/ckks_config.json")
+	}
+	x0 := append([]float64(nil), cfg.X0...)
 
 	xsStd, usStd, _, tStd := core.Simulate(x0, solveStandard, A, B, TSteps)
 
@@ -169,7 +149,7 @@ func main() {
 			chebCoeffs,
 			chebBound,
 			chebEta,
-			chebClip,
+			false,
 			seed,
 		)
 		info := map[string]float64{
@@ -214,46 +194,6 @@ func main() {
 
 	fmt.Printf("\nSaved CSV outputs to %s\n", outDir)
 	fmt.Printf("Saved plots to %s\n", plotDir)
-}
-
-
-
-type ckksConfig struct {
-	Mass            float64   `json:"m"`
-	Length          float64   `json:"l"`
-	Gravity         float64   `json:"g"`
-	DT              float64   `json:"dt"`
-	N               int       `json:"N"`
-	QDiag           []float64 `json:"QDiag"`
-	RDiag           []float64 `json:"RDiag"`
-	QfScale         float64   `json:"QfScale"`
-	ThetaMax        float64   `json:"thetaMax"`
-	OmegaMax        float64   `json:"omegaMax"`
-	UMax            float64   `json:"uMax"`
-	Sigma0          float64   `json:"sigma0"`
-	LambdaParam     float64   `json:"lambda"`
-	LogN            int       `json:"logN"`
-	LogQ            []int     `json:"logQ"`
-	LogP            []int     `json:"logP"`
-	LogDefaultScale int       `json:"logDefaultScale"`
-	K               int       `json:"K"`
-	T               int       `json:"T"`
-	TSteps          int       `json:"TSteps"`
-	ChebOrder       int       `json:"chebOrder"`
-	ChebBound       float64   `json:"chebBound"`
-	ChebEta         float64   `json:"chebEta"`
-}
-
-func loadConfig(path string) (ckksConfig, bool) {
-	var cfg ckksConfig
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return cfg, false
-	}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		panic(err)
-	}
-	return cfg, true
 }
 
 func diagDense(vals []float64) *mat.Dense {

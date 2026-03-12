@@ -25,11 +25,13 @@ type Config struct {
 	LogP            []int     `json:"logP"`
 	LogDefaultScale int       `json:"logDefaultScale"`
 	K               int       `json:"K"`
+	NWorkers        int       `json:"nWorkers"`
 	T               int       `json:"T"`
 	TSteps          int       `json:"TSteps"`
 	ChebOrder       int       `json:"chebOrder"`
 	ChebBound       float64   `json:"chebBound"`
 	ChebEta         float64   `json:"chebEta"`
+	ChebClip        bool      `json:"chebClip"`
 }
 
 func Load(path string) (Config, bool) {
