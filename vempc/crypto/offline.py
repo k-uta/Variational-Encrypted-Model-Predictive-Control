@@ -23,6 +23,79 @@ from .setup import CryptoSetup
 
 
 # ------------------------------------------------------------------
+# Module-level encrypted matrix-vector product primitives
+# ------------------------------------------------------------------
+
+def enc_matvec_ct_pt(cc, ct_diags, xi_plain):
+    """
+    Encrypted matrix (diagonal form) times plaintext vector.
+
+    For each diagonal index k, the k-th diagonal of M is stored in
+    ct_diags[k].  The plaintext vector xi is cyclically rotated by k
+    positions, encoded, and multiplied slot-wise with ct_diags[k].
+
+    This is the ct-pt variant: EvalMult(ct, pt) per diagonal.
+    No relinearization is required.
+
+    Parameters
+    ----------
+    cc : CryptoContext
+        Active OpenFHE CKKS context.
+    ct_diags : list of Ciphertext, length = width
+        Encrypted diagonals of M.  ct_diags[k] encrypts the k-th
+        diagonal [M[i, (i+k) % width] for i in range(width)].
+    xi_plain : array-like, length = width
+        Plaintext vector to multiply.
+
+    Returns
+    -------
+    Ciphertext
+        Encrypts M @ xi_plain (slot-wise diagonal sum).
+    """
+    width = len(ct_diags)
+    xi    = list(xi_plain)
+    acc   = None
+    for k, ct_d in enumerate(ct_diags):
+        rot  = xi[k:] + xi[:k]                   # cyclic left-rotation by k
+        ptxt = cc.MakeCKKSPackedPlaintext(rot)
+        term = cc.EvalMult(ct_d, ptxt)            # EvalMult(ct, pt)
+        acc  = term if acc is None else cc.EvalAdd(acc, term)
+    return acc
+
+
+def enc_matvec_ct_ct(cc, ct_diags, ct_xi):
+    """
+    Encrypted matrix (diagonal form) times encrypted vector.
+
+    Identical structure to enc_matvec_ct_pt, with two substitutions:
+      - plaintext cyclic rotation  ->  EvalRotate(ct_xi, k)
+      - EvalMult(ct, pt)           ->  EvalMult(ct, ct)
+
+    The k=0 case skips EvalRotate (no-op rotation avoids a key-switch).
+
+    Parameters
+    ----------
+    cc : CryptoContext
+        Active OpenFHE CKKS context.
+    ct_diags : list of Ciphertext, length = width
+        Encrypted diagonals of M (same layout as enc_matvec_ct_pt).
+    ct_xi : Ciphertext
+        Encrypted vector to multiply.
+
+    Returns
+    -------
+    Ciphertext
+        Encrypts M @ decrypt(ct_xi) (slot-wise diagonal sum).
+    """
+    acc = None
+    for k, ct_d in enumerate(ct_diags):
+        ct_rot = cc.EvalRotate(ct_xi, k) if k > 0 else ct_xi  # EvalRot (key-switch)
+        term   = cc.EvalMult(ct_d, ct_rot)                     # EvalMult(ct, ct)
+        acc    = term if acc is None else cc.EvalAdd(acc, term)
+    return acc
+
+
+# ------------------------------------------------------------------
 # Worker function
 # ------------------------------------------------------------------
 
@@ -61,17 +134,6 @@ def _generate_worker_cache(args):
         diag = [Gamma_sq[i, (i + k) % p] for i in range(p)]
         Gamma_diags.append(cc.Encrypt(pub, cc.MakeCKKSPackedPlaintext(diag)))
 
-    # -- Unified encrypted matrix-vector product --
-    def _enc_matvec(ct_diags, xi):
-        """xi must have length == len(ct_diags)."""
-        ct = None
-        for k, ct_d in enumerate(ct_diags):
-            rot  = list(xi[k:]) + list(xi[:k])
-            ptxt = cc.MakeCKKSPackedPlaintext(rot)
-            term = cc.EvalMult(ct_d, ptxt)
-            ct   = term if ct is None else cc.EvalAdd(ct, term)
-        return ct
-
     def _pack(ct_list, slot_width):
         packed = None
         for k, ct in enumerate(ct_list):
@@ -88,8 +150,9 @@ def _generate_worker_cache(args):
         xi_batch     = [np.random.randn(dim) for _ in range(K_chunk)]
         xi_batch_pad = [np.concatenate([xi, np.zeros(p - dim)]) for xi in xi_batch]
 
-        ct_Lu_list    = [_enc_matvec(L_U_diags,   xi)     for xi in xi_batch]
-        ct_Gamma_list = [_enc_matvec(Gamma_diags, xi_pad) for xi_pad in xi_batch_pad]
+        # Use module-level enc_matvec_ct_pt (ct-pt variant)
+        ct_Lu_list    = [enc_matvec_ct_pt(cc, L_U_diags,   xi)     for xi in xi_batch]
+        ct_Gamma_list = [enc_matvec_ct_pt(cc, Gamma_diags, xi_pad) for xi_pad in xi_batch_pad]
 
         ct_Lu_packed    = _pack(ct_Lu_list,    slot_width=dim)
         ct_Gamma_packed = _pack(ct_Gamma_list, slot_width=p)
@@ -150,15 +213,11 @@ class OfflinePreprocessor:
         return vec[k:] + vec[:k]
 
     def _enc_matvec(self, ct_diags, xi):
-        """Encrypted matrix-vector product. xi must have length == len(ct_diags)."""
-        cc = self.crypto.cc
-        ct = None
-        for k, ct_d in enumerate(ct_diags):
-            rot  = self._rotate_vector(xi, k)
-            ptxt = cc.MakeCKKSPackedPlaintext(rot)
-            term = cc.EvalMult(ct_d, ptxt)
-            ct   = term if ct is None else cc.EvalAdd(ct, term)
-        return ct
+        """
+        Encrypted matrix-vector product (ct-pt). Delegates to enc_matvec_ct_pt.
+        xi must be a plaintext array with length == len(ct_diags).
+        """
+        return enc_matvec_ct_pt(self.crypto.cc, ct_diags, xi)
 
     def _pack_samples(self, ct_list, slot_width):
         cc = self.crypto.cc
@@ -249,7 +308,7 @@ class OfflinePreprocessor:
                 K_chunk,
                 self.dim,
                 self.p,
-                self.L_U,    # pass actual L_U to workers
+                self.L_U,
                 self.Gamma,
                 crypto_dir,
             )
