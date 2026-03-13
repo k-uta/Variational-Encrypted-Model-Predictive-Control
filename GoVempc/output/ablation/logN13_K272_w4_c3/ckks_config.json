@@ -21,10 +21,8 @@
   "uMax": 1.0,
   "sigma0": 0.25,
   "lambda": 0.1,
-  "logN": 14,
+  "logN": 13,
   "logQ": [
-    30,
-    30,
     30,
     30,
     30,
@@ -34,10 +32,10 @@
     30
   ],
   "logDefaultScale": 40,
-  "K": 544,
+  "K": 272,
   "nWorkers": 4,
   "T": 30,
-  "chebOrder": 5,
+  "chebOrder": 3,
   "chebBound": 5.0,
   "chebEta": 500.0
 }

@@ -26,8 +26,6 @@
     30,
     30,
     30,
-    30,
-    30,
     30
   ],
   "logP": [
@@ -37,7 +35,7 @@
   "K": 544,
   "nWorkers": 4,
   "T": 30,
-  "chebOrder": 5,
+  "chebOrder": 3,
   "chebBound": 5.0,
   "chebEta": 500.0
 }

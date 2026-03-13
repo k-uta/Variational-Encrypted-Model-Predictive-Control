@@ -34,7 +34,7 @@
     30
   ],
   "logDefaultScale": 40,
-  "K": 544,
+  "K": 272,
   "nWorkers": 4,
   "T": 30,
   "chebOrder": 5,
