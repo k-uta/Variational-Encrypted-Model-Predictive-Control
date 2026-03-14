@@ -2,26 +2,6 @@ package examples
 
 import "gonum.org/v1/gonum/mat"
 
-func LinearizedCartpoleContinuous(M, m, l, g float64) (*mat.Dense, *mat.Dense) {
-	// Linearized cart-pole around upright equilibrium (small angle).
-	// State: [pos, vel, theta, theta_dot], input: cart force.
-	Ac := mat.NewDense(4, 4, nil)
-	Bc := mat.NewDense(4, 1, nil)
-
-	// xdot = v
-	Ac.Set(0, 1, 1.0)
-	// vdot = u/M + (m*g/M) * theta
-	Ac.Set(1, 2, (m*g)/M)
-	Bc.Set(1, 0, 1.0/M)
-	// thetadot = omega
-	Ac.Set(2, 3, 1.0)
-	// omegadot = -(1/(l*M)) u - ((M+m)g/(l*M)) * theta
-	Ac.Set(3, 2, -((M+m)*g)/(l*M))
-	Bc.Set(3, 0, -1.0/(l*M))
-
-	return Ac, Bc
-}
-
 func LinearizedInvertedPendulumContinuous(m, l, g float64) (*mat.Dense, *mat.Dense) {
 	// Linearized inverted pendulum around upright equilibrium (small angle).
 	// State: [theta, theta_dot], input: torque at the pivot.

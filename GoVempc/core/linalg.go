@@ -61,15 +61,6 @@ func MatVecMul(a mat.Matrix, x []float64) []float64 {
 	return out
 }
 
-func VecAdd(a, b []float64) []float64 {
-	// Elementwise addition.
-	out := make([]float64, len(a))
-	for i := range a {
-		out[i] = a[i] + b[i]
-	}
-	return out
-}
-
 func VecSub(a, b []float64) []float64 {
 	// Elementwise subtraction.
 	out := make([]float64, len(a))

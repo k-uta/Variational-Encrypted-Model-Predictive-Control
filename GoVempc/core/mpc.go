@@ -1,7 +1,6 @@
 package core
 
 import (
-	"math"
 	"time"
 
 	"gonum.org/v1/gonum/mat"
@@ -47,10 +46,6 @@ func NewMPCProblem(A, B, Q, R, Qf *mat.Dense, N int) *MPCProblem {
 	mpc.Lambda, mpc.Psi = mpc.computePredictionMatrices()
 	mpc.P, mpc.S, mpc.H = mpc.computeCostMatrices()
 	return mpc
-}
-
-func (m *MPCProblem) StateDim() int {
-	return m.n
 }
 
 func (m *MPCProblem) InputDim() int {
@@ -128,20 +123,6 @@ func (m *MPCProblem) computeCostMatrices() (*mat.Dense, *mat.Dense, *mat.Dense) 
 	H.Scale(2.0, &H)
 
 	return &P, &S, &H
-}
-
-func (m *MPCProblem) QuadraticCost(x0 []float64, U []float64) float64 {
-	// J_0(x0, U) = x0^T P x0 + x0^T S U + 0.5 U^T H U.
-	Px0 := MatVecMul(m.P, x0)
-	x0Px0 := Dot(x0, Px0)
-
-	SU := MatVecMul(m.S, U)
-	x0SU := Dot(x0, SU)
-
-	HU := MatVecMul(m.H, U)
-	UTHU := Dot(U, HU)
-
-	return x0Px0 + x0SU + 0.5*UTHU
 }
 
 func (m *MPCProblem) BuildConstraintMatrices(Gx *mat.Dense, hx []float64, Gu *mat.Dense, hu []float64) (*mat.Dense, func([]float64) []float64) {
@@ -296,24 +277,6 @@ func MaxConstraintViolation(xs, us *mat.Dense, Gx *mat.Dense, hx []float64, Gu *
 		vu = 0.0
 	}
 	return vx, vu
-}
-
-func AvgAcceptance(info []map[string]float64) float64 {
-	// Average acceptance rate from controller info (if provided).
-	sum := 0.0
-	count := 0
-	for _, d := range info {
-		if v, ok := d["accept_rate"]; ok {
-			if !math.IsNaN(v) {
-				sum += v
-				count++
-			}
-		}
-	}
-	if count == 0 {
-		return math.NaN()
-	}
-	return sum / float64(count)
 }
 
 func rowSlice(m *mat.Dense, row int) []float64 {

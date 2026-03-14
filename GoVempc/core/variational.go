@@ -198,15 +198,6 @@ func chebReLU(residuals *mat.Dense, coeffs []float64, bound float64, _ bool) *ma
 	return out
 }
 
-func sumRow(m *mat.Dense, row int) float64 {
-	_, c := m.Dims()
-	sum := 0.0
-	for j := 0; j < c; j++ {
-		sum += m.At(row, j)
-	}
-	return sum
-}
-
 func chebVal(t float64, coeffs []float64) float64 {
 	n := len(coeffs)
 	if n == 0 {

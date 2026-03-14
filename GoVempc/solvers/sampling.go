@@ -1,16 +1,6 @@
 package solvers
 
-import (
-	"gonum.org/v1/gonum/mat"
-
-	"govempc/core"
-)
-
-// Is this necessary?
-func SampleTilted(variational *core.VariationalMPC, x0 []float64, K int, seed int64) *mat.Dense {
-	// Draw K samples from the tilted Gaussian kappa_tilde.
-	return variational.SampleKappaTilde(x0, K, seed)
-}
+import "govempc/core"
 
 func SampleVariationalControl(
 	x0 []float64,
@@ -26,7 +16,7 @@ func SampleVariationalControl(
 
 	// Monte Carlo estimator with polynomial surrogate feasibility weights.
 	// Each row represents U^{(i)}
-	U := SampleTilted(variational, x0, K, seed)
+	U := variational.SampleKappaTilde(x0, K, seed)
 
 	// Exact feasibility count (used only for diagnostics).
 	feasible := penalty.IsFeasibleMat(U, x0, 1e-6)

@@ -295,7 +295,7 @@ func plotMPC(xs, us *mat.Dense, dt float64, thetaMax, omegaMax, uMax float64, ti
 	}
 	addBounds(p1, t[0], t[len(t)-1], omegaMax)
 
-	p2, err := stepPlot(tu, colSlice(us, 0), "time [s]", "u [N·m]")
+	p2, err := stepPlot(tu, colSlice(us, 0), "time [s]", "u [N쨌m]")
 	if err != nil {
 		return err
 	}
