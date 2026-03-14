@@ -24,13 +24,13 @@
   "K": 240,
   "logN": 13,
   "logQ": [
-    30,
+    33,
     30,
     30,
     30
   ],
   "logP": [
-    30
+    35
   ],
   "logDefaultScale": 30,
   "chebOrder": 3,
