@@ -1,0 +1,43 @@
+{
+  "m": 0.2,
+  "l": 0.5,
+  "g": 9.81,
+  "dt": 0.05,
+  "N": 10,
+  "QDiag": [
+    50.0,
+    5.0
+  ],
+  "RDiag": [
+    0.1
+  ],
+  "QfScale": 2.0,
+  "x0": [
+    0.3,
+    0.1
+  ],
+  "thetaMax": 0.5,
+  "omegaMax": 0.8,
+  "uMax": 1.0,
+  "sigma0": 0.25,
+  "lambda": 0.1,
+  "logN": 14,
+  "logQ": [
+    30,
+    30,
+    30,
+    30,
+    30,
+    30
+  ],
+  "logP": [
+    30
+  ],
+  "logDefaultScale": 40,
+  "K": 272,
+  "nWorkers": 4,
+  "T": 30,
+  "chebOrder": 5,
+  "chebBound": 5.0,
+  "chebEta": 500.0
+}
