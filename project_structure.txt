@@ -1,9 +1,198 @@
 .
+├── cache
+│   ├── crypto
+│   │   ├── context.bin
+│   │   ├── eval_mult_key.bin
+│   │   ├── eval_rot_key.bin
+│   │   ├── public_key.bin
+│   │   └── secret_key.bin
+│   ├── worker_0
+│   │   ├── ct_Gamma_0000.bin
+│   │   ├── ct_Gamma_0001.bin
+│   │   ├── ct_Gamma_0002.bin
+...
+│   ├── worker_1
+│   │   ├── ct_Gamma_0000.bin
+│   │   ├── ct_Gamma_0001.bin
+│   │   ├── ct_Gamma_0002.bin
+...
+│   │   ├── ct_Lu_0000.bin
+│   │   ├── ct_Lu_0001.bin
+│   │   ├── ct_Lu_0002.bin
+...
+├── cache_pend
+│   ├── crypto
+│   │   ├── context.bin
+│   │   ├── eval_mult_key.bin
+│   │   ├── eval_rot_key.bin
+│   │   ├── public_key.bin
+│   │   └── secret_key.bin
+│   ├── worker_0
+│   │   ├── ct_Gamma_0000.bin
+│   │   ├── ct_Gamma_0001.bin
+│   │   ├── ct_Gamma_0002.bin
+...
+│   │   ├── ct_Lu_0000.bin
+│   │   ├── ct_Lu_0001.bin
+│   │   ├── ct_Lu_0002.bin
+...
+│   ├── worker_1
+│   │   ├── ct_Gamma_0000.bin
+│   │   ├── ct_Gamma_0001.bin
+...
+│   │   ├── ct_Lu_0000.bin
+│   │   ├── ct_Lu_0001.bin
+│   │   ├── ct_Lu_0002.bin
+...
+│   ├── worker_2
+│   │   ├── ct_Gamma_0000.bin
+│   │   ├── ct_Gamma_0001.bin
+...
+│   │   ├── ct_Lu_0000.bin
+│   │   ├── ct_Lu_0001.bin
+│   │   ├── ct_Lu_0002.bin
+...
+│   └── worker_3
+...
+├── GoVempc
+│   ├── ckks_offline.exe
+│   ├── ckks_online.exe
+│   ├── cmd
+│   │   ├── ckks_offline
+│   │   │   ├── crypto.go
+│   │   │   ├── helper.go
+│   │   │   └── main.go
+│   │   ├── ckks_online
+│   │   │   ├── crypto.go
+│   │   │   ├── helper.go
+│   │   │   ├── main.go
+│   │   │   └── worker.go
+│   │   ├── test
+│   │   │   ├── main.ipynb
+│   │   │   └── run_ablation.py
+│   │   └── unencrypted
+│   │       └── main.go
+│   ├── core
+│   │   ├── constraints.go
+│   │   ├── linalg.go
+│   │   ├── mpc.go
+│   │   └── variational.go
+│   ├── examples
+│   │   └── pendulum.go
+│   ├── go.mod
+│   ├── go.sum
+│   ├── internal
+│   │   └── ckksconfig
+│   │       └── config.go
+│   ├── output
+│   │   ├── ablation
+│   │   │   ├── logN13_K136_w4_c3
+│   │   │   │   ├── ckks_config.json
+│   │   │   │   ├── us_ckks.csv
+│   │   │   │   ├── us_variational.csv
+│   │   │   │   ├── xs_ckks.csv
+│   │   │   │   └── xs_variational.csv
+│   │   │   ├── logN13_K136_w4_c4
+│   │   │   │   ├── ckks_config.json
+│   │   │   │   ├── us_ckks.csv
+│   │   │   │   ├── us_variational.csv
+│   │   │   │   ├── xs_ckks.csv
+│   │   │   │   └── xs_variational.csv
+│   │   │   ├── logN13_K136_w4_c5
+│   │   │   │   ├── ckks_config.json
+│   │   │   │   ├── us_ckks.csv
+│   │   │   │   ├── us_variational.csv
+│   │   │   │   ├── xs_ckks.csv
+│   │   │   │   └── xs_variational.csv
+│   │   │   ├── logN13_K272_w4_c3
+│   │   │   │   ├── ckks_config.json
+│   │   │   │   ├── us_ckks.csv
+│   │   │   │   ├── us_variational.csv
+│   │   │   │   ├── xs_ckks.csv
+│   │   │   │   └── xs_variational.csv
+│   │   │   ├── logN13_K272_w4_c4
+│   │   │   │   ├── ckks_config.json
+│   │   │   │   ├── us_ckks.csv
+│   │   │   │   ├── us_variational.csv
+│   │   │   │   ├── xs_ckks.csv
+│   │   │   │   └── xs_variational.csv
+│   │   │   ├── logN13_K272_w4_c5
+│   │   │   │   ├── ckks_config.json
+│   │   │   │   ├── us_ckks.csv
+│   │   │   │   ├── us_variational.csv
+│   │   │   │   ├── xs_ckks.csv
+│   │   │   │   └── xs_variational.csv
+│   │   │   ├── logN14_K272_w4_c3
+│   │   │   │   ├── ckks_config.json
+│   │   │   │   ├── us_ckks.csv
+│   │   │   │   ├── us_variational.csv
+│   │   │   │   ├── xs_ckks.csv
+│   │   │   │   └── xs_variational.csv
+│   │   │   ├── logN14_K272_w4_c4
+│   │   │   │   ├── ckks_config.json
+│   │   │   │   ├── us_ckks.csv
+│   │   │   │   ├── us_variational.csv
+│   │   │   │   ├── xs_ckks.csv
+│   │   │   │   └── xs_variational.csv
+│   │   │   ├── logN14_K272_w4_c5
+│   │   │   │   ├── ckks_config.json
+│   │   │   │   ├── us_ckks.csv
+│   │   │   │   ├── us_variational.csv
+│   │   │   │   ├── xs_ckks.csv
+│   │   │   │   └── xs_variational.csv
+│   │   │   ├── logN14_K544_w4_c3
+│   │   │   │   ├── ckks_config.json
+│   │   │   │   ├── us_ckks.csv
+│   │   │   │   ├── us_variational.csv
+│   │   │   │   ├── xs_ckks.csv
+│   │   │   │   └── xs_variational.csv
+│   │   │   ├── logN14_K544_w4_c4
+│   │   │   │   ├── ckks_config.json
+│   │   │   │   ├── us_ckks.csv
+│   │   │   │   ├── us_variational.csv
+│   │   │   │   ├── xs_ckks.csv
+│   │   │   │   └── xs_variational.csv
+│   │   │   ├── logN14_K544_w4_c5
+│   │   │   │   ├── ckks_config.json
+│   │   │   │   ├── us_ckks.csv
+│   │   │   │   ├── us_variational.csv
+│   │   │   │   ├── xs_ckks.csv
+│   │   │   │   └── xs_variational.csv
+│   │   │   └── summary.csv
+│   │   ├── accept_series.csv
+│   │   ├── ckks_cache
+│   │   │   └── crypto
+│   │   │       ├── params.bin
+│   │   │       ├── pk.bin
+│   │   │       ├── rlk.bin
+│   │   │       └── sk.bin
+│   │   ├── ckks_config.json
+│   │   ├── control_iter_ms_ckks.csv
+│   │   ├── overlay_plot.png
+│   │   ├── plots
+│   │   │   ├── standard_mpc.png
+│   │   │   ├── variational_mpc.png
+│   │   │   └── variational_stats.png
+│   │   ├── us_ckks.csv
+│   │   ├── us_standard.csv
+│   │   ├── us_variational.csv
+│   │   ├── w_sum_series.csv
+│   │   ├── xs_ckks.csv
+│   │   ├── xs_standard.csv
+│   │   └── xs_variational.csv
+│   └── solvers
+│       ├── cheb.go
+│       ├── qpmc.go
+│       └── sampling.go
 ├── project_structure.txt
 ├── README.md
+├── results
+│   └── threshold.png
 ├── Variational-Encrypted-Model-Predictive-Control.code-workspace
 └── vempc
-    ├── __init__.py
+    ├── __pycache__
+    │   ├── __init__.cpython-312.pyc
+    │   └── __init__.cpython-313.pyc
     ├── backends
     │   ├── __init__.py
     │   ├── base.py
@@ -11,30 +200,60 @@
     │   └── plaintext_backend.py
     ├── core
     │   ├── __init__.py
+    │   ├── __pycache__
+    │   │   ├── __init__.cpython-312.pyc
+    │   │   ├── __init__.cpython-313.pyc
+    │   │   ├── constraints.cpython-312.pyc
+    │   │   ├── mpc.cpython-312.pyc
+    │   │   ├── mpc.cpython-313.pyc
+    │   │   └── variational.cpython-312.pyc
     │   ├── constraints.py
     │   ├── mpc.py
     │   └── variational.py
     ├── crypto
     │   ├── __init__.py
+    │   ├── __pycache__
+    │   │   ├── __init__.cpython-312.pyc
+    │   │   ├── offline.cpython-312.pyc
+    │   │   ├── online.cpython-312.pyc
+    │   │   ├── poly_eval.cpython-312.pyc
+    │   │   └── setup.cpython-312.pyc
     │   ├── offline.py
     │   ├── online.py
     │   ├── poly_eval.py
     │   └── setup.py
     ├── examples
+    │   ├── __init__.py
+    │   ├── __pycache__
+    │   │   ├── __init__.cpython-312.pyc
+    │   │   ├── double_integrator.cpython-312.pyc
+    │   │   └── pendulum.cpython-312.pyc
     │   ├── double_integrator.py
     │   └── pendulum.py
     ├── notebooks
+    │   ├── encrypted_simulation_pendulum_zoomed.png
+    │   ├── encrypted_simulation_pendulum.png
+    │   ├── encrypted_simulation.png
     │   ├── softening_r.ipynb
     │   ├── test_double_integrator.ipynb
+    │   ├── test_encrypted_pend.ipynb
+    │   ├── test_encrypted_pend.py
     │   ├── test_encrypted.ipynb
-    │   └── test.ipynb
+    │   ├── test_encrypted.py
+    │   ├── test_plaintext.ipynb
+    │   ├── test.ipynb
+    │   └── tilting_computation_gain_benchmark.ipynb
     ├── solvers
     │   ├── __init__.py
+    │   ├── __pycache__
+    │   │   ├── __init__.cpython-312.pyc
+    │   │   ├── qpMPC.cpython-312.pyc
+    │   │   └── sampling.cpython-312.pyc
     │   ├── qpMPC.py
     │   └── sampling.py
     └── utils
-        ├── __init__.py
-        ├── helpers.py
-        └── print.py
+        └── __pycache__
+            ├── __init__.cpython-312.pyc
+            └── print.cpython-312.pyc
 
-9 directories, 29 files
+56 directories, 648 files
