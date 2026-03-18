@@ -21,3 +21,6 @@ cache_pend/
 # Go output (large locally-generated files)
 GoVempc/output/
 vempc/notebooks/*.png
+
+GoVempc/ckks_offline
+GoVempc/ckks_online
