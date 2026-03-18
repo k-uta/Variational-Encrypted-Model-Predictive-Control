@@ -7,14 +7,16 @@ venv/
 dist/
 build/
 .vscode/
-.DS_Storegocache/
+.DS_Store
 .env
 .gocache/
 .gomodcache/
 
+# Cache directories (large locally-generated files)
 cache/
 cache_pend/
 *.bin
-.DS_Store
-
 *.exe
+
+# Go output (large locally-generated files)
+GoVempc/output/
