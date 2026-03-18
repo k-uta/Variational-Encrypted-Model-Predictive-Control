@@ -16,3 +16,5 @@ cache/
 cache_pend/
 *.bin
 .DS_Store
+
+*.exe
