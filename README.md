@@ -5,7 +5,7 @@ Implementation accompanying the paper:
 > **Variational Encrypted Model Predictive Control**  
 > Jihoon Suh, Yeongjun Jang, Junsoo Kim, and Takashi Tanaka  
 > *Submitted to IEEE L-CSS / CDC 2026 (under review)*  
-> Preprint: *coming soon*
+> Preprint: [arXiv:2603.19450](https://arxiv.org/abs/2603.19450)
 
 ---
 
@@ -130,15 +130,17 @@ All benchmarks were run on an Apple MacBook Pro (M5, 4 performance cores, 24 GB 
 
 ## Citation
 
-Once the arXiv preprint is available, the citation will be updated here. For now:
+If you use this code, please cite:
 
 ```bibtex
-@article{suh2026vempc,
-  title   = {Variational Encrypted Model Predictive Control},
-  author  = {Suh, Jihoon and Jang, Yeongjun and Kim, Junsoo and Tanaka, Takashi},
-  journal = {IEEE Control Systems Letters},
-  year    = {2026},
-  note    = {Under review}
+@misc{suh2026variationalencryptedmodelpredictive,
+  title         = {Variational Encrypted Model Predictive Control},
+  author        = {Suh, Jihoon and Jang, Yeongjun and Kim, Junsoo and Tanaka, Takashi},
+  year          = {2026},
+  eprint        = {2603.19450},
+  archivePrefix = {arXiv},
+  primaryClass  = {eess.SY},
+  url           = {https://arxiv.org/abs/2603.19450}
 }
 ```
 
