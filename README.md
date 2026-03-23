@@ -130,7 +130,7 @@ All benchmarks were run on an Apple MacBook Pro (M5, 4 performance cores, 24 GB 
 
 ## Citation
 
-If you use this code, please cite:
+If you find this work helpful, please cite:
 
 ```bibtex
 @misc{suh2026variationalencryptedmodelpredictive,
