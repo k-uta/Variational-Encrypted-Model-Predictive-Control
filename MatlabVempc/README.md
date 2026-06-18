@@ -1,26 +1,34 @@
 # MATLAB Implementation (MatlabVempc)
 
-A MATLAB port of the **plaintext variational MPC** that accompanies the paper
-*Variational Encrypted Model Predictive Control* (Suh, Jang, Kim, Tanaka — IEEE
-L-CSS 2026).
+A MATLAB implementation of the paper *Variational Encrypted Model Predictive
+Control* (Suh, Jang, Kim, Tanaka — IEEE L-CSS 2026), with **two entry points**:
 
-It implements the variational reformulation of Section IV (tilted Gaussian
-sampling + Chebyshev feasibility surrogate) and reproduces the closed-loop
-behavior shown in Fig. 1 of the paper. The encrypted CKKS protocol
-(Algorithms 1–2) lives in the Python (`vempc/`) and Go (`GoVempc/`)
-implementations; CKKS homomorphic encryption is not available natively in
-MATLAB, so this port targets the *unencrypted* algorithm — which, per the
-paper, VEMPC reproduces up to bounded encryption error.
+| Entry point | What it runs | Needs Go? |
+|-------------|--------------|-----------|
+| `run_vempc` | **Plaintext** variational MPC (Section IV) — pure MATLAB | No |
+| `run_vempc_encrypted` | **Encrypted** VEMPC (Algorithms 1–2) — MATLAB orchestrates the real CKKS engine | Yes |
 
-No toolboxes are required to run the variational MPC. If the Optimization
-Toolbox is installed, a standard QP-MPC reference (`quadprog`) is also computed
-and overlaid for comparison.
+`run_vempc` implements the variational reformulation (tilted Gaussian sampling +
+Chebyshev feasibility surrogate) entirely in MATLAB and reproduces the
+closed-loop behavior of Fig. 1.
+
+`run_vempc_encrypted` runs the **genuine 128-bit-secure CKKS protocol**: the
+client-side preparation and orchestration are in MATLAB, while the homomorphic
+cloud computation is delegated to the project's Lattigo (Go) engine
+(`GoVempc/cmd/ckks_offline` + `ckks_online`). CKKS is not available natively in
+MATLAB (no multiprecision/RLWE library comparable to OpenFHE/Lattigo), so the
+encryption core is reused rather than reimplemented; MATLAB drives the full
+pipeline and overlays the encrypted trajectory against the plaintext one.
+
+No toolboxes are required for `run_vempc`. If the Optimization Toolbox is
+installed, a standard QP-MPC reference (`quadprog`) is also overlaid.
 
 ## Layout
 
 ```
 MatlabVempc/
-├── run_vempc.m                 % entry point (run this)
+├── run_vempc.m                 % entry point: plaintext variational MPC
+├── run_vempc_encrypted.m       % entry point: encrypted VEMPC (drives Go CKKS)
 ├── config/
 │   └── vempc_config.json       % parameters (same schema as the Go config)
 ├── +vempc/                     % MATLAB package (namespace vempc.*)
@@ -31,12 +39,15 @@ MatlabVempc/
 │   ├── VariationalMPC.m        % tilted sampling + surrogate weighting
 │   ├── chebyshevReLUCoeffs.m   % Chebyshev fit of ReLU (feasibility surrogate)
 │   ├── chebVal.m               % Clenshaw evaluation of a Chebyshev series
-│   ├── sampleVariationalControl.m % one online MPC step
+│   ├── sampleVariationalControl.m % one online MPC step (plaintext)
 │   ├── simulate.m              % closed-loop rollout
 │   ├── trajectoryCost.m        % realized LQ cost
 │   ├── maxConstraintViolation.m   % max state/input violation
-│   └── loadConfig.m            % JSON loader with paper defaults
-└── output/                     % generated CSVs + figure (git-ignored)
+│   ├── loadConfig.m            % JSON loader with paper defaults
+│   ├── findGo.m                % locate the Go toolchain (encrypted path)
+│   ├── writeGoConfig.m         % MATLAB cfg -> GoVempc ckks_config.json
+│   └── runGoEncrypted.m        % run Go offline+online, read encrypted outputs
+└── output/                     % generated CSVs + figures (git-ignored)
 ```
 
 ## Quickstart
@@ -62,6 +73,32 @@ matlab -batch "run_vempc"
 Outputs (`xs_variational.csv`, `us_variational.csv`, `variational_mpc.png`, and
 the standard-MPC CSVs when `quadprog` is available) are written to
 `MatlabVempc/output/`.
+
+### Encrypted path (real CKKS via Go)
+
+```matlab
+cd MatlabVempc
+run_vempc_encrypted             % runs the genuine CKKS protocol, then overlays
+```
+
+This requires the **Go toolchain** (https://go.dev/dl). On first run, fetch the
+Go dependencies once:
+
+```bash
+cd GoVempc
+go mod download
+```
+
+`run_vempc_encrypted` then:
+1. writes the shared config to `GoVempc/output/ckks_config.json`,
+2. runs `cmd/ckks_offline` (Algorithm 1) → encrypted cache,
+3. runs `cmd/ckks_online` (Algorithm 2) → encrypted closed-loop trajectory,
+4. reads the results back, computes cost/violation and the CKKS approximation
+   error vs the plaintext run, and saves `encrypted_vs_plaintext.png` +
+   `xs_ckks.csv` / `us_ckks.csv` to `MatlabVempc/output/`.
+
+If Go is not found, the function prints setup instructions and returns without
+error (the plaintext `run_vempc` always works without Go).
 
 ## Compatibility with the Go / Python ports
 

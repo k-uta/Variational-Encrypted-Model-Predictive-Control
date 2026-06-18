@@ -22,7 +22,7 @@ VEMPC is a privacy-preserving MPC protocol that outsources control computation t
 Three implementations are provided:
 - **Python** (`vempc/`): encrypted, uses [OpenFHE-Python](https://github.com/openfheorg/openfhe-python)
 - **Go** (`GoVempc/`): encrypted, uses [Lattigo](https://github.com/tuneinsight/lattigo)
-- **MATLAB** (`MatlabVempc/`): plaintext variational MPC (the unencrypted baseline that VEMPC reproduces; no CKKS), requires no toolboxes
+- **MATLAB** (`MatlabVempc/`): plaintext variational MPC in pure MATLAB (`run_vempc`, no toolboxes), plus an encrypted entry point (`run_vempc_encrypted`) that orchestrates the real CKKS protocol via the Go/Lattigo engine
 
 ---
 
@@ -86,8 +86,15 @@ run_vempc            % or:  matlab -batch "run_vempc"  from a shell
 ```
 
 This runs the plaintext variational MPC and writes trajectories + a figure to
-`MatlabVempc/output/`. See [`MatlabVempc/README.md`](MatlabVempc/README.md) for
-details.
+`MatlabVempc/output/`. To run the **encrypted** protocol from MATLAB (drives the
+Go/Lattigo CKKS engine; requires the Go toolchain):
+
+```matlab
+cd MatlabVempc
+run_vempc_encrypted
+```
+
+See [`MatlabVempc/README.md`](MatlabVempc/README.md) for details.
 
 ---
 
