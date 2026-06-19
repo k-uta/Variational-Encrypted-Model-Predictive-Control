@@ -128,33 +128,39 @@ function printGoSetupHelp(goVempcDir, configPath)
 end
 
 % ----------------------------------------------------------------------
+% Overlay plot in the paper Fig. 1 style: encrypted (blue solid) vs
+% unencrypted (orange dashed), red dotted constraints, no title.
 function plotOverlay(cfg, xsP, usP, xsE, usE, figPath)
-    tX = (0:size(xsP, 1) - 1) * cfg.dt;
-    tU = (0:size(usP, 1) - 1) * cfg.dt;
+    tXp = (0:size(xsP, 1) - 1) * cfg.dt;
+    tUp = (0:size(usP, 1) - 1) * cfg.dt;
     tXe = (0:size(xsE, 1) - 1) * cfg.dt;
     tUe = (0:size(usE, 1) - 1) * cfg.dt;
+    tEnd = max([tXp(end), tXe(end), cfg.dt]);
 
-    fig = figure('Visible', 'off', 'Position', [100, 100, 1100, 360]);
-    blue = [0 0.2 0.8]; orange = [0.85 0.5 0];
+    fig = figure('Visible', 'off', 'Position', [100, 100, 1100, 230]);
 
-    subplot(1, 3, 1); hold on; grid on;
-    plot(tX,  xsP(:, 1), '-',  'LineWidth', 1.8, 'Color', blue);
-    plot(tXe, xsE(:, 1), '--', 'LineWidth', 1.5, 'Color', orange);
-    yline( cfg.thetaMax, 'r:'); yline(-cfg.thetaMax, 'r:');
-    xlabel('time [s]'); ylabel('\theta [rad]'); title('VEMPC: encrypted vs plaintext');
+    ax1 = subplot(1, 3, 1); hold(ax1, 'on'); grid(ax1, 'on'); box(ax1, 'on');
+    hU = plot(ax1, tXp, xsP(:, 1), '--', 'LineWidth', 1.6, 'Color', vempcColor('orange'));
+    hE = plot(ax1, tXe, xsE(:, 1), '-',  'LineWidth', 1.6, 'Color', vempcColor('blue'));
+    drawBounds(ax1, tEnd, cfg.thetaMax);
+    xlabel(ax1, 'Time [s]'); ylabel(ax1, '$\theta(t)$', 'Interpreter', 'latex');
+    xlim(ax1, [0 tEnd]); ylim(ax1, ylimPad(cfg.thetaMax, xsP(:,1), xsE(:,1)));
+    legend(ax1, [hE hU], {'Encrypted', 'Unencrypted'}, ...
+        'Orientation', 'horizontal', 'Location', 'north', 'Box', 'off');
 
-    subplot(1, 3, 2); hold on; grid on;
-    plot(tX,  xsP(:, 2), '-',  'LineWidth', 1.8, 'Color', blue);
-    plot(tXe, xsE(:, 2), '--', 'LineWidth', 1.5, 'Color', orange);
-    yline( cfg.omegaMax, 'r:'); yline(-cfg.omegaMax, 'r:');
-    xlabel('time [s]'); ylabel('$\dot\theta$ [rad/s]', 'Interpreter', 'latex');
+    ax2 = subplot(1, 3, 2); hold(ax2, 'on'); grid(ax2, 'on'); box(ax2, 'on');
+    plot(ax2, tXp, xsP(:, 2), '--', 'LineWidth', 1.6, 'Color', vempcColor('orange'));
+    plot(ax2, tXe, xsE(:, 2), '-',  'LineWidth', 1.6, 'Color', vempcColor('blue'));
+    drawBounds(ax2, tEnd, cfg.omegaMax);
+    xlabel(ax2, 'Time [s]'); ylabel(ax2, '$\dot{\theta}(t)$', 'Interpreter', 'latex');
+    xlim(ax2, [0 tEnd]); ylim(ax2, ylimPad(cfg.omegaMax, xsP(:,2), xsE(:,2)));
 
-    subplot(1, 3, 3); hold on; grid on;
-    stairs(tU,  usP(:, 1), '-',  'LineWidth', 1.8, 'Color', blue);
-    stairs(tUe, usE(:, 1), '--', 'LineWidth', 1.5, 'Color', orange);
-    yline( cfg.uMax, 'r:'); yline(-cfg.uMax, 'r:');
-    xlabel('time [s]'); ylabel('u');
-    legend({'plaintext (MATLAB)', 'encrypted CKKS (Go)'}, 'Location', 'best');
+    ax3 = subplot(1, 3, 3); hold(ax3, 'on'); grid(ax3, 'on'); box(ax3, 'on');
+    stairs(ax3, tUp, usP(:, 1), '--', 'LineWidth', 1.6, 'Color', vempcColor('orange'));
+    stairs(ax3, tUe, usE(:, 1), '-',  'LineWidth', 1.6, 'Color', vempcColor('blue'));
+    drawBounds(ax3, tEnd, cfg.uMax);
+    xlabel(ax3, 'Time [s]'); ylabel(ax3, '$u(t)$', 'Interpreter', 'latex');
+    xlim(ax3, [0 tEnd]); ylim(ax3, ylimPad(cfg.uMax, usP(:,1), usE(:,1)));
 
     try
         exportgraphics(fig, figPath, 'Resolution', 150);
@@ -162,4 +168,34 @@ function plotOverlay(cfg, xsP, usP, xsE, usE, figPath)
         saveas(fig, figPath);
     end
     close(fig);
+end
+
+% Shared paper-style helpers -------------------------------------------
+function c = vempcColor(name)
+    switch name
+        case 'blue',   c = [0 0.2 0.8];
+        case 'orange', c = [0.90 0.50 0.10];
+        case 'red',    c = [0.85 0.10 0.10];
+        otherwise,     c = [0 0 0];
+    end
+end
+
+function drawBounds(ax, tEnd, bound)
+    red = vempcColor('red');
+    plot(ax, [0 tEnd], [ bound  bound], ':', 'Color', red, 'LineWidth', 1.2);
+    plot(ax, [0 tEnd], [-bound -bound], ':', 'Color', red, 'LineWidth', 1.2);
+end
+
+function yl = ylimPad(bound, varargin)
+    m  = 0.2;
+    lo = -bound * (1 + m);
+    hi =  bound * (1 + m);
+    for k = 1:numel(varargin)
+        d = varargin{k};
+        if ~isempty(d)
+            lo = min(lo, min(d(:)) - 0.05 * bound);
+            hi = max(hi, max(d(:)) + 0.05 * bound);
+        end
+    end
+    yl = [lo hi];
 end

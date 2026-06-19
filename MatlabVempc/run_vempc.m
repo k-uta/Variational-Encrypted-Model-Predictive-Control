@@ -154,37 +154,42 @@ function [u, Useq, info] = standardController(x, mpc, G, hFunc, qpOpts)
 end
 
 % ----------------------------------------------------------------------
-% Plotting
+% Plotting (paper Fig. 1 style)
 % ----------------------------------------------------------------------
 function plotResults(cfg, xsVar, usVar, xsStd, usStd, figPath)
     tX = (0:size(xsVar, 1) - 1) * cfg.dt;
     tU = (0:size(usVar, 1) - 1) * cfg.dt;
+    tEnd = max(tX(end), cfg.dt);
     hasStd = ~isempty(xsStd);
+    if hasStd, sX1 = xsStd(:,1); sX2 = xsStd(:,2); sU = usStd(:,1);
+    else,      sX1 = [];        sX2 = [];        sU = []; end
 
-    fig = figure('Visible', 'off', 'Position', [100, 100, 1100, 360]);
+    fig = figure('Visible', 'off', 'Position', [100, 100, 1100, 230]);
 
-    subplot(1, 3, 1); hold on; grid on;
-    if hasStd; plot(tX, xsStd(:, 1), '--', 'LineWidth', 1.5, 'Color', [0.85 0.5 0]); end
-    plot(tX, xsVar(:, 1), '-', 'LineWidth', 1.8, 'Color', [0 0.2 0.8]);
-    yline( cfg.thetaMax, 'r:'); yline(-cfg.thetaMax, 'r:');
-    xlabel('time [s]'); ylabel('\theta [rad]'); title('Variational MPC');
-
-    subplot(1, 3, 2); hold on; grid on;
-    if hasStd; plot(tX, xsStd(:, 2), '--', 'LineWidth', 1.5, 'Color', [0.85 0.5 0]); end
-    plot(tX, xsVar(:, 2), '-', 'LineWidth', 1.8, 'Color', [0 0.2 0.8]);
-    yline( cfg.omegaMax, 'r:'); yline(-cfg.omegaMax, 'r:');
-    xlabel('time [s]'); ylabel('$\dot\theta$ [rad/s]', 'Interpreter', 'latex');
-
-    subplot(1, 3, 3); hold on; grid on;
-    if hasStd; stairs(tU, usStd(:, 1), '--', 'LineWidth', 1.5, 'Color', [0.85 0.5 0]); end
-    stairs(tU, usVar(:, 1), '-', 'LineWidth', 1.8, 'Color', [0 0.2 0.8]);
-    yline( cfg.uMax, 'r:'); yline(-cfg.uMax, 'r:');
-    xlabel('time [s]'); ylabel('u');
+    ax1 = subplot(1, 3, 1); hold(ax1, 'on'); grid(ax1, 'on'); box(ax1, 'on');
+    hS = []; if hasStd, hS = plot(ax1, tX, sX1, '--', 'LineWidth', 1.6, 'Color', vempcColor('orange')); end
+    hV = plot(ax1, tX, xsVar(:, 1), '-', 'LineWidth', 1.6, 'Color', vempcColor('blue'));
+    drawBounds(ax1, tEnd, cfg.thetaMax);
+    xlabel(ax1, 'Time [s]'); ylabel(ax1, '$\theta(t)$', 'Interpreter', 'latex');
+    xlim(ax1, [0 tEnd]); ylim(ax1, ylimPad(cfg.thetaMax, xsVar(:,1), sX1));
     if hasStd
-        legend({'standard', 'variational'}, 'Location', 'best');
-    else
-        legend({'variational'}, 'Location', 'best');
+        legend(ax1, [hV hS], {'Variational', 'Standard'}, ...
+            'Orientation', 'horizontal', 'Location', 'north', 'Box', 'off');
     end
+
+    ax2 = subplot(1, 3, 2); hold(ax2, 'on'); grid(ax2, 'on'); box(ax2, 'on');
+    if hasStd, plot(ax2, tX, sX2, '--', 'LineWidth', 1.6, 'Color', vempcColor('orange')); end
+    plot(ax2, tX, xsVar(:, 2), '-', 'LineWidth', 1.6, 'Color', vempcColor('blue'));
+    drawBounds(ax2, tEnd, cfg.omegaMax);
+    xlabel(ax2, 'Time [s]'); ylabel(ax2, '$\dot{\theta}(t)$', 'Interpreter', 'latex');
+    xlim(ax2, [0 tEnd]); ylim(ax2, ylimPad(cfg.omegaMax, xsVar(:,2), sX2));
+
+    ax3 = subplot(1, 3, 3); hold(ax3, 'on'); grid(ax3, 'on'); box(ax3, 'on');
+    if hasStd, stairs(ax3, tU, sU, '--', 'LineWidth', 1.6, 'Color', vempcColor('orange')); end
+    stairs(ax3, tU, usVar(:, 1), '-', 'LineWidth', 1.6, 'Color', vempcColor('blue'));
+    drawBounds(ax3, tEnd, cfg.uMax);
+    xlabel(ax3, 'Time [s]'); ylabel(ax3, '$u(t)$', 'Interpreter', 'latex');
+    xlim(ax3, [0 tEnd]); ylim(ax3, ylimPad(cfg.uMax, usVar(:,1), sU));
 
     try
         exportgraphics(fig, figPath, 'Resolution', 150);
@@ -192,4 +197,37 @@ function plotResults(cfg, xsVar, usVar, xsStd, usStd, figPath)
         saveas(fig, figPath);
     end
     close(fig);
+end
+
+% Shared paper-style helpers -------------------------------------------
+function c = vempcColor(name)
+    switch name
+        case 'blue',   c = [0 0.2 0.8];
+        case 'orange', c = [0.90 0.50 0.10];
+        case 'red',    c = [0.85 0.10 0.10];
+        otherwise,     c = [0 0 0];
+    end
+end
+
+function drawBounds(ax, tEnd, bound)
+    % Red dotted constraint lines spanning the time axis (paper style).
+    red = vempcColor('red');
+    plot(ax, [0 tEnd], [ bound  bound], ':', 'Color', red, 'LineWidth', 1.2);
+    plot(ax, [0 tEnd], [-bound -bound], ':', 'Color', red, 'LineWidth', 1.2);
+end
+
+function yl = ylimPad(bound, varargin)
+    % Y-limits a little wider than the symmetric constraint +/- bound, expanded
+    % further only if the data would otherwise be clipped.
+    m  = 0.2;
+    lo = -bound * (1 + m);
+    hi =  bound * (1 + m);
+    for k = 1:numel(varargin)
+        d = varargin{k};
+        if ~isempty(d)
+            lo = min(lo, min(d(:)) - 0.05 * bound);
+            hi = max(hi, max(d(:)) + 0.05 * bound);
+        end
+    end
+    yl = [lo hi];
 end
