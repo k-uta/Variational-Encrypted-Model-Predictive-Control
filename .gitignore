@@ -22,5 +22,11 @@ cache_pend/
 GoVempc/output/
 vempc/notebooks/*.png
 
+# MATLAB output (locally-generated)
+MatlabVempc/output/
+
 GoVempc/ckks_offline
 GoVempc/ckks_online
+
+# AI Tools
+.claude/
